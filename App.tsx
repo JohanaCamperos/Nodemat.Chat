@@ -1,15 +1,30 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, Menu, Settings, X, Plus, MessageSquare, Image, MoreVertical, Trash2, StopCircle, RefreshCw, Copy, Check, Edit2, Play, Square, Paperclip, ChevronDown, CheckCircle2, AlertTriangle, AlertCircle, Info, Download, Upload, ExternalLink, Power, Cpu, Globe, Lock, Key, Server, Settings2, Search, Terminal, Wrench, Ban, Sun, Moon, Shield, ShieldOff, Plug, Layout, LogOut, Palette, VenetianMask, EyeOff, FileCode, GraduationCap } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
+import { Share2, FileText, FileJson, Sparkles } from 'lucide-react';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Tooltip } from './components/Tooltip';
 import { storageService } from './services/storageService';
-import { sendMessage, fetchModels, connectToMCP, getFriendlyMCPError } from './services/llmService';
+import { sendMessage, fetchModels, ToolApprovalRequest } from './services/llmService';
+import { connectServer, disconnectServer, getFriendlyMCPError } from './services/mcpClient';
+import { setBridgeToken } from './services/bridge';
+import { ChatGPTAccountCard } from './components/ChatGPTAccountCard';
+import {
+    fileToAttachment, downloadImage, downloadAttachment, formatBytes, ACCEPT_ATTRIBUTE,
+    exportSessionJSON, exportSessionMarkdown, shareSession, shareText, copyText, shareOutcomeLabel,
+    importSessionsFromFile, sessionToMarkdown
+} from './services/fileService';
+import { GeneratedImage } from './services/imageGenService';
 import { ImageGenModal } from './components/ImageGenModal';
 import { FileUploadModal } from './components/FileUploadModal';
 import { ChatImage } from './components/ChatImage';
+import { ToolCallsBlock, ToolResultCard } from './components/ToolMessage';
 import { SearchableSelect } from './components/SearchableSelect';
-import { AppSettings, ChatSession, Message, Provider, Attachment, MCPTransport, MCPServer, ThemeOption, MCPAuthType } from './types';
+import { AppSettings, ChatSession, Message, Provider, Attachment, MCPTransport, MCPServer, ThemeOption, MCPAuthType, PROVIDER_NAMES } from './types';
+
+/** react-markdown elimina las URLs `data:` por seguridad; permitimos sólo imágenes. */
+const markdownUrlTransform = (url: string) =>
+    /^data:image\/(png|jpe?g|gif|webp);base64,/i.test(url) ? url : defaultUrlTransform(url);
 
 // Safe Env Access (supports both REACT_APP_ and VITE_ prefixes)
 const getEnv = (key: string, defaultVal: string = '') => {
@@ -94,6 +109,19 @@ const DEFAULT_SETTINGS: AppSettings = {
     custom2Connected: !!getEnv('REACT_APP_CUSTOM2_API_KEY', ''),
     custom2ModelsList: [],
 
+    // Cuenta de ChatGPT (experimental)
+    chatgptKey: '',
+    chatgptRefreshToken: '',
+    chatgptAccountId: '',
+    chatgptExpiresAt: 0,
+    chatgptEmail: '',
+    chatgptPlan: '',
+    chatgptModel: 'gpt-5',
+    chatgptConnected: false,
+    chatgptModelsList: ['gpt-5', 'gpt-5-codex'],
+
+    proxyToken: '',
+
     // System Prompt
     systemPrompt: '',
 
@@ -114,27 +142,7 @@ const INITIAL_SESSION: ChatSession = {
 
 // --- UI HELPERS ---
 
-// Helper function to download images
-const downloadImage = async (src: string, filenamePrefix: string = 'nodemat') => {
-    try {
-        const response = await fetch(src);
-        if (!response.ok) throw new Error("Network error");
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        a.download = `${filenamePrefix}-${timestamp}.png`;
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-        document.body.removeChild(a);
-    } catch (err) {
-        console.error("Download failed:", err);
-        alert("Error al descargar la imagen.");
-    }
-};
+// downloadImage vive ahora en services/fileService.ts (detecta la extensión real y tiene fallback CORS)
 
 // --- UI COMPONENTS ---
 
@@ -216,8 +224,12 @@ const LoginScreen = ({ onLogin }: { onLogin: () => void }) => {
 
 // --- MODALS ---
 
-const ToolApprovalModal = ({ pendingTool, onConfirm }: { pendingTool: any, onConfirm: (allowed: boolean) => void }) => {
+type ToolDecision = 'deny' | 'allow' | 'always';
+
+const ToolApprovalModal = ({ pendingTool, onConfirm }: { pendingTool: (ToolApprovalRequest & { resolve: (v: boolean) => void }) | null, onConfirm: (decision: ToolDecision) => void }) => {
     if (!pendingTool) return null;
+    const destructive = pendingTool.annotations?.destructiveHint === true && pendingTool.annotations?.readOnlyHint !== true;
+    const readOnly = pendingTool.annotations?.readOnlyHint === true;
 
     return (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[100] flex items-center justify-center p-4 animate-in fade-in duration-200">
@@ -226,16 +238,23 @@ const ToolApprovalModal = ({ pendingTool, onConfirm }: { pendingTool: any, onCon
                     <div className="bg-amber-100 dark:bg-amber-800/40 p-2 rounded-lg text-amber-600 dark:text-amber-400">
                         <Wrench size={24} />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                         <h3 className="text-lg font-bold text-text-main">Solicitud de Herramienta</h3>
-                        <p className="text-sm text-text-muted">La IA quiere ejecutar una acción en tu servidor local.</p>
+                        <p className="text-sm text-text-muted truncate">
+                            La IA quiere ejecutar una acción en <strong className="text-text-main">{pendingTool.serverName}</strong>
+                        </p>
                     </div>
                 </div>
 
-                <div className="p-6 space-y-4">
+                <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto">
                     <div>
                         <span className="text-xs font-bold text-text-muted uppercase tracking-wider">Herramienta</span>
-                        <div className="font-mono text-lg font-semibold text-primary mt-1">{pendingTool.toolName}</div>
+                        <div className="font-mono text-lg font-semibold text-primary mt-1 break-all">{pendingTool.originalName}</div>
+                        {pendingTool.description && <p className="text-xs text-text-muted mt-1 line-clamp-4">{pendingTool.description}</p>}
+                        <div className="flex gap-2 mt-2">
+                            {readOnly && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300">SOLO LECTURA</span>}
+                            {destructive && <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300">⚠️ PUEDE MODIFICAR / BORRAR DATOS</span>}
+                        </div>
                     </div>
 
                     <div>
@@ -248,18 +267,28 @@ const ToolApprovalModal = ({ pendingTool, onConfirm }: { pendingTool: any, onCon
                     </div>
                 </div>
 
-                <div className="p-5 bg-surface-highlight border-t border-border flex gap-3 justify-end">
+                <div className="p-5 bg-surface-highlight border-t border-border flex flex-wrap gap-3 justify-end">
                     <button
-                        onClick={() => onConfirm(false)}
+                        onClick={() => onConfirm('deny')}
                         className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-800 border border-border text-text-muted hover:text-red-500 hover:border-red-200 rounded-xl font-medium transition-colors"
                     >
                         <Ban size={18} /> Rechazar
                     </button>
+                    {!destructive && (
+                        <button
+                            onClick={() => onConfirm('always')}
+                            className="flex items-center gap-2 px-4 py-2 border border-primary text-primary hover:bg-primary/10 rounded-xl font-medium transition-colors"
+                            title="No volver a preguntar por esta herramienta hasta recargar la página"
+                        >
+                            <CheckCircle2 size={18} /> Permitir siempre
+                        </button>
+                    )}
                     <button
-                        onClick={() => onConfirm(true)}
+                        autoFocus
+                        onClick={() => onConfirm('allow')}
                         className="flex items-center gap-2 px-5 py-2 bg-primary text-white hover:bg-primary-hover shadow-md hover:shadow-lg rounded-xl font-bold transition-all transform active:scale-95"
                     >
-                        <Play size={18} /> Aprobar Ejecución
+                        <Play size={18} /> Aprobar
                     </button>
                 </div>
             </div>
@@ -267,7 +296,7 @@ const ToolApprovalModal = ({ pendingTool, onConfirm }: { pendingTool: any, onCon
     );
 };
 
-const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onDeleteAll, storageUsage }) => {
+const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onImport, onDeleteAll, storageUsage }) => {
     const [filename, setFilename] = useState(`nexus_backup_${new Date().toISOString().slice(0, 10)}`);
 
     if (!isOpen) return null;
@@ -325,6 +354,16 @@ const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onDeleteAll, st
                         <Download size={20} /> Exportar Todos los Chats
                     </button>
 
+                    <label className="w-full flex items-center justify-center gap-3 p-3 border border-border text-text-main rounded-xl hover:bg-surface-highlight transition-colors font-medium cursor-pointer">
+                        <Upload size={20} /> Importar Chats (JSON)
+                        <input
+                            type="file"
+                            accept="application/json,.json"
+                            className="hidden"
+                            onChange={(e) => { const f = e.target.files?.[0]; if (f) onImport(f); e.target.value = ''; }}
+                        />
+                    </label>
+
                     <button
                         onClick={onDeleteAll}
                         className="w-full flex items-center justify-center gap-3 p-3 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 rounded-xl hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors font-medium border border-red-100 dark:border-red-900/30"
@@ -371,7 +410,13 @@ const Sidebar: React.FC<any> = ({
                     <Plus size={18} />
                     Nuevo Chat
                 </button>
-
+                <button
+                    onClick={() => { setIsImageModalOpen(true); onClose(); }}
+                    className="w-full mt-2 flex items-center justify-center gap-2 border border-border text-text-main hover:bg-surface-highlight p-3 rounded-xl transition-all font-medium text-sm"
+                >
+                    <Sparkles size={18} className="text-purple-500" />
+                    Generar Imágenes
+                </button>
 
             </div>
 
@@ -510,6 +555,9 @@ const SettingsModal: React.FC<any> = ({
                         <h3 className="text-lg font-semibold text-text-main">Proveedores de IA</h3>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            {/* CHATGPT ACCOUNT CARD (experimental) */}
+                            <ChatGPTAccountCard settings={settings} setSettings={setSettings} />
+
                             {/* GROQ CARD */}
                             <div className={`border rounded-xl p-5 transition-all bg-surface ${settings.groqConnected ? 'border-green-200 bg-green-50/20' : 'border-border'}`}>
                                 <div className="flex items-center justify-between mb-4">
@@ -869,7 +917,7 @@ const SettingsModal: React.FC<any> = ({
                             <div className="flex items-start gap-2 text-xs text-orange-600 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/10 p-2 rounded border border-orange-100 dark:border-orange-900/30">
                                 <AlertTriangle size={14} className="shrink-0 mt-0.5" />
                                 <p>
-                                    <strong>Importante:</strong> Los servidores deben soportar <strong>CORS</strong> para funcionar en el navegador. Si usas servidores locales (localhost), asegúrate de que permitan conexiones desde este dominio.
+                                    <strong>Importante:</strong> Los servidores deben soportar <strong>CORS</strong> para funcionar en el navegador: permitir este origen, los headers <code>Mcp-Session-Id</code> y <code>MCP-Protocol-Version</code>, y exponer <code>Mcp-Session-Id</code>. Servidores <code>stdio</code> necesitan un puente HTTP (ej. <code>npx supergateway --stdio "..." --outputTransport streamableHttp --cors</code>).
                                 </p>
                             </div>
                         </div>
@@ -879,8 +927,10 @@ const SettingsModal: React.FC<any> = ({
                             {settings.mcpServers.map((server: any, idx: number) => (
                                 <div key={server.id} className="bg-surface p-4 rounded-xl space-y-4 border border-border shadow-sm">
                                     <div className="flex justify-between items-start">
-                                        <h4 className="font-bold text-text-main flex items-center gap-2 text-sm">
-                                            <Server size={14} /> Servidor #{idx + 1}
+                                        <h4 className="font-bold text-text-main flex items-center gap-2 text-sm min-w-0">
+                                            <Server size={14} className="shrink-0" />
+                                            <span className="truncate">{server.name || server.serverInfo?.name || `Servidor #${idx + 1}`}</span>
+                                            {server.status === 'connected' && <span className="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Conectado" />}
                                         </h4>
                                         <button onClick={() => removeMCPServer(server.id)} className="text-text-muted hover:text-red-500">
                                             <Trash2 size={16} />
@@ -921,8 +971,9 @@ const SettingsModal: React.FC<any> = ({
                                                     }}
                                                     className="w-full p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none disabled:opacity-60"
                                                 >
-                                                    <option value="sse">SSE</option>
-                                                    <option value="http-stream">HTTP Stream</option>
+                                                    <option value="auto">Auto (recomendado)</option>
+                                                    <option value="http-stream">Streamable HTTP (/mcp)</option>
+                                                    <option value="sse">SSE legacy (/sse)</option>
                                                 </select>
                                             </div>
                                         </div>
@@ -947,9 +998,30 @@ const SettingsModal: React.FC<any> = ({
                                                 >
                                                     <option value="none">Ninguna</option>
                                                     <option value="api-key">API Key</option>
-                                                    <option value="oauth">OAuth 2.0</option>
+                                                    <option value="oauth">Bearer / OAuth (token manual)</option>
                                                 </select>
                                             </div>
+
+                                            {server.authType === 'api-key' && (
+                                                <div className="flex-1">
+                                                    <label className="block text-xs font-medium text-text-muted mb-1 uppercase">Header</label>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Authorization"
+                                                        value={server.authHeader || ''}
+                                                        disabled={server.status === 'connected'}
+                                                        onChange={(e: any) => {
+                                                            const val = e.target.value;
+                                                            setSettings((s: AppSettings) => ({
+                                                                ...s,
+                                                                mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, authHeader: val } : srv)
+                                                            }));
+                                                        }}
+                                                        className="w-full p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none font-mono disabled:opacity-60"
+                                                        title="Vacío = 'Authorization: Bearer <key>'. Ej: X-API-Key"
+                                                    />
+                                                </div>
+                                            )}
 
                                             {server.authType !== 'none' && (
                                                 <div className="flex-[2] animate-in fade-in slide-in-from-left-2">
@@ -974,6 +1046,26 @@ const SettingsModal: React.FC<any> = ({
                                         </div>
                                     </div>
 
+                                    <label className="flex items-start gap-2 text-xs text-text-muted cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            className="mt-0.5"
+                                            checked={!!server.useProxy}
+                                            disabled={server.status === 'connected'}
+                                            onChange={(e: any) => {
+                                                const val = e.target.checked;
+                                                setSettings((s: AppSettings) => ({
+                                                    ...s,
+                                                    mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, useProxy: val } : srv)
+                                                }));
+                                            }}
+                                        />
+                                        <span>
+                                            <strong className="text-text-main">Conectar vía proxy</strong> — evita el bloqueo CORS pasando por <code>/api/mcp</code> de esta app.
+                                            Necesario para n8n Cloud. El host debe estar en <code>MCP_PROXY_ALLOWED_HOSTS</code> (por defecto <code>*.n8n.cloud</code>).
+                                        </span>
+                                    </label>
+
                                     {/* Actions & Status */}
                                     <div className="flex items-center gap-3 pt-2">
                                         {server.status === 'connected' ? (
@@ -994,6 +1086,29 @@ const SettingsModal: React.FC<any> = ({
                                             </button>
                                         )}
                                     </div>
+
+                                    {/* Connection info (educativo: qué se negoció en el handshake) */}
+                                    {server.status === 'connected' && (
+                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-muted bg-green-50/50 dark:bg-green-900/10 border border-green-200/60 dark:border-green-800/30 rounded-lg p-3">
+                                            {server.serverInfo && <span><strong className="text-text-main">{server.serverInfo.name}</strong>{server.serverInfo.version ? ` v${server.serverInfo.version}` : ''}</span>}
+                                            {server.resolvedTransport && <span>Transporte: <code>{server.resolvedTransport}</code></span>}
+                                            {server.protocolVersion && <span>Protocolo: <code>{server.protocolVersion}</code></span>}
+                                            <label className="flex items-center gap-2 ml-auto cursor-pointer select-none">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!server.autoApprove}
+                                                    onChange={(e: any) => {
+                                                        const val = e.target.checked;
+                                                        setSettings((s: AppSettings) => ({
+                                                            ...s,
+                                                            mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, autoApprove: val } : srv)
+                                                        }));
+                                                    }}
+                                                />
+                                                Ejecutar sin pedir confirmación
+                                            </label>
+                                        </div>
+                                    )}
 
                                     {/* Error Banner */}
                                     {server.status === 'error' && (
@@ -1032,8 +1147,10 @@ const SettingsModal: React.FC<any> = ({
                                                                 {isEnabled && <CheckCircle2 size={12} className="text-white" />}
                                                             </div>
                                                             <div className="flex-1 min-w-0">
-                                                                <div className={`text-sm font-bold truncate ${isEnabled ? 'text-primary' : 'text-text-main'}`}>
-                                                                    {tool.name}
+                                                                <div className={`text-sm font-bold truncate flex items-center gap-1.5 ${isEnabled ? 'text-primary' : 'text-text-main'}`}>
+                                                                    <span className="truncate">{tool.title || tool.name}</span>
+                                                                    {tool.annotations?.readOnlyHint && <span className="text-[9px] px-1.5 rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300 shrink-0">lectura</span>}
+                                                                    {tool.annotations?.destructiveHint && !tool.annotations?.readOnlyHint && <span className="text-[9px] px-1.5 rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 shrink-0">destructiva</span>}
                                                                 </div>
                                                                 <div className="text-xs text-text-muted line-clamp-2 leading-relaxed">
                                                                     {tool.description || 'Sin descripción.'}
@@ -1047,6 +1164,17 @@ const SettingsModal: React.FC<any> = ({
                                     )}
                                 </div>
                             ))}
+                            <div className="flex flex-col md:flex-row md:items-center gap-2 text-xs text-text-muted bg-surface p-3 rounded-xl border border-border">
+                                <label className="font-medium uppercase flex items-center gap-1 shrink-0"><Key size={12} /> Token del proxy</label>
+                                <input
+                                    type="password"
+                                    value={settings.proxyToken || ''}
+                                    onChange={(e: any) => { const val = e.target.value; setSettings((s: AppSettings) => ({ ...s, proxyToken: val })); }}
+                                    placeholder="Sólo si definiste NODEMAT_PROXY_TOKEN en Vercel"
+                                    className="flex-1 p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none font-mono"
+                                />
+                            </div>
+
                             <button
                                 onClick={addMCPServer}
                                 className="w-full py-3 border-2 border-dashed border-border rounded-xl text-text-muted font-medium hover:border-primary hover:text-primary transition-colors flex items-center justify-center gap-2"
@@ -1120,15 +1248,7 @@ const StorageWarningModal = ({
     );
 };
 
-// --- Storage Helpers ---
-const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
-
+// --- Storage Helpers --- (formatBytes viene de services/fileService)
 const getStorageUsage = async () => {
     const estimate = await storageService.getUsageEstimate();
     if (estimate) {
@@ -1273,7 +1393,10 @@ export default function App() {
                 return {
                     ...DEFAULT_SETTINGS, ...parsed,
                     mcpRegistryUrl: parsed.mcpRegistryUrl || DEFAULT_SETTINGS.mcpRegistryUrl,
-                    mcpServers: Array.isArray(parsed.mcpServers) ? parsed.mcpServers : []
+                    // Un servidor que quedó "loading" al recargar nunca terminaría de conectar
+                    mcpServers: Array.isArray(parsed.mcpServers)
+                        ? parsed.mcpServers.map((s: MCPServer) => s.status === 'loading' ? { ...s, status: 'idle' } : s)
+                        : []
                 };
             } catch (e) {
                 return DEFAULT_SETTINGS;
@@ -1307,6 +1430,7 @@ export default function App() {
             check('openRouterKey', 'openRouterConnected');
             check('cerebrasKey', 'cerebrasConnected');
             check('xaiKey', 'xaiConnected');
+            check('chatgptKey', 'chatgptConnected');
             // Check custom providers if keys exist
             if (prev.custom1Key && prev.custom1Url) check('custom1Key', 'custom1Connected');
             if (prev.custom2Key && prev.custom2Url) check('custom2Key', 'custom2Connected');
@@ -1321,20 +1445,23 @@ export default function App() {
         const connectedMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
-            custom1: 'custom1Connected', custom2: 'custom2Connected'
+            custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
 
         const isCurrentConnected = settings[connectedMap[settings.activeProvider]];
         if (!isCurrentConnected) {
             // Find first connected provider
-            const providers: Provider[] = ['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2'];
+            const providers: Provider[] = ['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'];
             const firstConnected = providers.find(p => settings[connectedMap[p]]);
 
             if (firstConnected) {
                 setSettings(s => ({ ...s, activeProvider: firstConnected }));
             }
         }
-    }, [settings.groqConnected, settings.openRouterConnected, settings.openaiConnected, settings.cerebrasConnected, settings.geminiConnected, settings.xaiConnected, settings.activeProvider]);
+    }, [settings.groqConnected, settings.openRouterConnected, settings.openaiConnected, settings.cerebrasConnected, settings.geminiConnected, settings.xaiConnected, settings.custom1Connected, settings.custom2Connected, settings.chatgptConnected, settings.activeProvider]);
+
+    // Token compartido con /api/mcp y /api/chatgpt
+    useEffect(() => { setBridgeToken(settings.proxyToken); }, [settings.proxyToken]);
 
     useEffect(() => {
         const initStorage = async () => {
@@ -1376,7 +1503,15 @@ export default function App() {
     const [chatToDelete, setChatToDelete] = useState<{ id: string, title: string } | null>(null);
 
     // Tool Approval State
-    const [pendingTool, setPendingTool] = useState<{ toolName: string, args: any, resolve: (v: boolean) => void } | null>(null);
+    const [pendingTool, setPendingTool] = useState<(ToolApprovalRequest & { resolve: (v: boolean) => void }) | null>(null);
+    const autoApprovedTools = useRef<Set<string>>(new Set());   // "Permitir siempre" (hasta recargar)
+    const abortRef = useRef<AbortController | null>(null);
+
+    // Sharing / drag & drop
+    const [isDragging, setIsDragging] = useState(false);
+    const [showShareMenu, setShowShareMenu] = useState(false);
+    const [toast, setToast] = useState('');
+    const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 2500); };
 
     // Connection Loading States
     const [isConnectingGroq, setIsConnectingGroq] = useState(false);
@@ -1610,22 +1745,22 @@ export default function App() {
         const keyMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqKey', openrouter: 'openRouterKey', openai: 'openaiKey',
             cerebras: 'cerebrasKey', gemini: 'geminiKey', xai: 'xaiKey',
-            custom1: 'custom1Key', custom2: 'custom2Key'
+            custom1: 'custom1Key', custom2: 'custom2Key', chatgpt: 'chatgptKey'
         };
         const connectedMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
-            custom1: 'custom1Connected', custom2: 'custom2Connected'
+            custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
         const modelsListMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
             cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
-            custom1: 'custom1ModelsList', custom2: 'custom2ModelsList'
+            custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
         };
         const modelMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqModel', openrouter: 'openRouterModel', openai: 'openaiModel',
             cerebras: 'cerebrasModel', gemini: 'geminiModel', xai: 'xaiModel',
-            custom1: 'custom1Model', custom2: 'custom2Model'
+            custom1: 'custom1Model', custom2: 'custom2Model', chatgpt: 'chatgptModel'
         };
 
         const key = settings[keyMap[provider]] as string;
@@ -1662,7 +1797,7 @@ export default function App() {
         const connectedMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
-            custom1: 'custom1Connected', custom2: 'custom2Connected'
+            custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
         setSettings(prev => ({ ...prev, [connectedMap[provider]]: false }));
     };
@@ -1672,8 +1807,9 @@ export default function App() {
     const addMCPServer = () => {
         const newServer: MCPServer = {
             id: Date.now().toString(),
-            url: 'http://localhost:8000/messages',
-            transport: 'sse',
+            url: 'https://TU-INSTANCIA.app.n8n.cloud/mcp/...',
+            transport: 'auto',
+            useProxy: true,
             authType: 'none',
             authToken: '',
             status: 'idle',
@@ -1685,6 +1821,7 @@ export default function App() {
     };
 
     const removeMCPServer = (serverId: string) => {
+        disconnectServer(serverId);
         setSettings(s => ({ ...s, mcpServers: s.mcpServers.filter(srv => srv.id !== serverId) }));
     };
 
@@ -1698,14 +1835,23 @@ export default function App() {
         if (!server) return;
 
         try {
-            const tools = await connectToMCP(server.url, server.transport, server.authType, server.authToken);
+            // Handshake completo: initialize -> notifications/initialized -> tools/list
+            const res = await connectServer({ ...server, url: server.url.trim() });
+            const toolNames = res.tools.map(t => t.name);
             setSettings(s => ({
                 ...s,
                 mcpServers: s.mcpServers.map(srv => srv.id === serverId ? {
                     ...srv,
                     status: 'connected',
-                    tools: tools,
-                    enabledTools: srv.enabledTools.length === 0 ? tools.map(t => t.name) : srv.enabledTools
+                    tools: res.tools,
+                    serverInfo: res.serverInfo,
+                    protocolVersion: res.protocolVersion,
+                    resolvedTransport: res.resolvedTransport,
+                    instructions: res.instructions,
+                    // Conservar la selección previa si las herramientas siguen existiendo
+                    enabledTools: srv.enabledTools.filter(n => toolNames.includes(n)).length > 0
+                        ? srv.enabledTools.filter(n => toolNames.includes(n))
+                        : toolNames
                 } : srv)
             }));
         } catch (e: any) {
@@ -1721,6 +1867,7 @@ export default function App() {
     };
 
     const disconnectMCPServer = (serverId: string) => {
+        disconnectServer(serverId);
         setSettings(s => ({
             ...s,
             mcpServers: s.mcpServers.map(srv => srv.id === serverId ? {
@@ -1748,96 +1895,60 @@ export default function App() {
         }));
     };
 
-    // Fixed File Upload to prevent white screen crashes
-    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const files = e.target.files;
-        if (!files || files.length === 0) return;
-
+    // --- Adjuntos: input, drag & drop y pegar desde el portapapeles ---
+    const addFiles = async (files: File[]) => {
         const newAttachments: Attachment[] = [];
+        const errors: string[] = [];
 
-        // Process files sequentially to avoid state thrashing
-        const fileList = Array.from(files) as File[];
-
-        // Final filter: only allow explicitly supported types
-        const allowedExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.txt', '.csv', '.json', '.md'];
-        const allowedMimeTypes = ['image/', 'text/plain', 'text/csv', 'application/json', 'text/markdown'];
-
-        for (const file of fileList) {
-            const fileName = file.name.toLowerCase();
-            const isAllowedExt = allowedExtensions.some(ext => fileName.endsWith(ext));
-            const isAllowedMime = allowedMimeTypes.some(type => file.type.startsWith(type));
-
-            if (!isAllowedExt && !isAllowedMime) {
-                alert(`El tipo de archivo de "${file.name}" no está permitido. Solo se aceptan imágenes, TXT, CSV y JSON.`);
-                continue;
-            }
-
-            if (file.size > 4 * 1024 * 1024) {
-                alert(`El archivo "${file.name}" es demasiado grande. El límite es de 4MB.`);
-                continue;
-            }
-
+        for (const file of files) {
             try {
-                const result = await new Promise<string>((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        const content = reader.result;
-                        // Ensure result is strictly string or ArrayBuffer
-                        if (content) {
-                            resolve(content as any);
-                        } else {
-                            reject(new Error("File content is empty"));
-                        }
-                    };
-                    reader.onerror = () => reject(reader.error || new Error("Unknown FileReader error"));
-
-                    if (file.type.startsWith('image/')) {
-                        reader.readAsDataURL(file);
-                    } else {
-                        reader.readAsText(file);
-                    }
-                });
-
-                let extractedText = undefined;
-                let finalData = typeof result === 'string' ? result : "";
-
-                newAttachments.push({
-                    name: file.name,
-                    type: file.type || 'text/plain',
-                    data: finalData,
-                    extractedText
-                });
-
-            } catch (err) {
-                console.error(`Error reading file ${file.name}`, err);
-                alert(`Error leyendo ${file.name}`);
+                newAttachments.push(await fileToAttachment(file));
+            } catch (err: any) {
+                errors.push(err.message || `Error leyendo ${file.name}`);
             }
         }
 
-        if (newAttachments.length > 0) {
-            setAttachments(prev => [...prev, ...newAttachments]);
-        }
-
-        // Clear input safely
-        if (e.target) e.target.value = '';
+        if (newAttachments.length > 0) setAttachments(prev => [...prev, ...newAttachments]);
+        if (errors.length > 0) alert(errors.join('\n'));
         setShowFileUploadModal(false);
+    };
+
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files ? Array.from(e.target.files) : [];
+        if (e.target) e.target.value = '';
+        if (files.length) await addFiles(files);
+    };
+
+    const handlePaste = (e: React.ClipboardEvent) => {
+        const files = Array.from(e.clipboardData.files);
+        if (files.length > 0) {
+            e.preventDefault();
+            addFiles(files);
+        }
     };
 
     // --- Tool Approval Logic ---
 
-    const handleToolApproval = async (toolName: string, args: any): Promise<boolean> => {
+    const handleToolApproval = async (req: ToolApprovalRequest): Promise<boolean> => {
+        if (autoApprovedTools.current.has(`${req.serverName}::${req.originalName}`)) return true;
         return new Promise<boolean>((resolve) => {
-            setPendingTool({
-                toolName,
-                args,
-                resolve
-            });
+            setPendingTool({ ...req, resolve });
         });
     };
 
-    const confirmTool = (allowed: boolean) => {
+    const confirmTool = (decision: ToolDecision) => {
         if (pendingTool) {
-            pendingTool.resolve(allowed);
+            if (decision === 'always') autoApprovedTools.current.add(`${pendingTool.serverName}::${pendingTool.originalName}`);
+            pendingTool.resolve(decision !== 'deny');
+            setPendingTool(null);
+        }
+    };
+
+    const handleStop = () => {
+        abortRef.current?.abort();
+        // Si estaba esperando aprobación, liberar la promesa
+        if (pendingTool) {
+            pendingTool.resolve(false);
             setPendingTool(null);
         }
     };
@@ -1845,12 +1956,12 @@ export default function App() {
     const handleSend = async () => {
         if ((!input.trim() && attachments.length === 0) || isLoading) return;
 
-    const connectedMap: Record<Provider, keyof AppSettings> = {
-        groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
-        cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
-        custom1: 'custom1Connected', custom2: 'custom2Connected'
-    };
-const isConnected = settings[connectedMap[settings.activeProvider]];
+        const connectedMap: Record<Provider, keyof AppSettings> = {
+            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
+            cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
+            custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
+        };
+        const isConnected = settings[connectedMap[settings.activeProvider]];
         if (!isConnected) {
             alert(`Por favor, conecta ${settings.activeProvider.toUpperCase()} en los Ajustes primero.`);
             setIsSettingsOpen(true);
@@ -1860,59 +1971,101 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
         // ============================================
         // CHAT MODE
         // ============================================
+        const sessionId = currentSessionId;
         const userMsg: Message = {
             id: Date.now().toString(),
             role: 'user',
             content: input,
             timestamp: Date.now(),
-            attachments: [...attachments]
+            attachments: attachments.length ? [...attachments] : undefined
         };
 
         const updatedMessages = [...currentSession.messages, userMsg];
         const updatedSession = { ...currentSession, messages: updatedMessages };
 
         if (currentSession.messages.length === 0) {
-            updatedSession.title = input.slice(0, 30) || 'Archivo adjunto';
+            updatedSession.title = input.slice(0, 30) || attachments[0]?.name || 'Archivo adjunto';
         }
 
-        setSessions(prev => prev.map(s => s.id === currentSessionId ? updatedSession : s));
+        setSessions(prev => prev.map(s => s.id === sessionId ? updatedSession : s));
         setInput('');
         setAttachments([]);
         setIsLoading(true);
 
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const showMessages = (extra: Message[]) => setSessions(prev => prev.map(s =>
+            s.id === sessionId ? { ...s, messages: [...updatedMessages, ...extra] } : s
+        ));
+
+        // Progreso parcial: si el usuario cancela, conservamos lo ya ejecutado
+        let partial: Message[] = [];
+
         try {
-            const newMessages = await sendMessage(
-                settings,
-                updatedMessages,
-                userMsg.content || "",
-                userMsg.attachments || [],
-                handleToolApproval
-            );
-
-            setSessions(prev => prev.map(s =>
-                s.id === currentSessionId
-                    ? { ...s, messages: [...updatedMessages, ...newMessages] }
-                    : s
-            ));
-
+            // El historial ya incluye el mensaje del usuario (antes se enviaba dos veces)
+            const newMessages = await sendMessage(settings, updatedMessages, {
+                onToolApproval: handleToolApproval,
+                onUpdate: (msgs) => { partial = msgs; showMessages(msgs); },
+                onSettingsPatch: (patch) => setSettings(s => ({ ...s, ...patch })),
+                sessionId,
+                signal: controller.signal
+            });
+            showMessages(newMessages);
         } catch (error: any) {
+            const cancelled = error?.name === 'AbortError' || controller.signal.aborted;
             const errorMsg: Message = {
                 id: (Date.now() + 1).toString(),
                 role: 'system',
-                content: `Error: ${error.message}. Verifica tu conexión.`,
+                content: cancelled ? '⏹️ Generación detenida por el usuario.' : `Error: ${error.message}. Verifica tu conexión.`,
                 timestamp: Date.now()
             };
-            setSessions(prev => prev.map(s =>
-                s.id === currentSessionId
-                    ? { ...s, messages: [...updatedMessages, errorMsg] }
-                    : s
-            ));
+            showMessages([...partial, errorMsg]);
         } finally {
+            abortRef.current = null;
             setIsLoading(false);
         }
     };
 
-    // Helper to check for images in response and trigger modal
+    // --- Imágenes generadas -> chat ---
+    const handleInsertGeneratedImages = (images: GeneratedImage[], prompt: string, meta: { provider: Provider; model: string; logs: any }) => {
+        const now = Date.now();
+        const userMsg: Message = { id: `${now}`, role: 'user', content: `🖼️ ${prompt}`, timestamp: now };
+        const modelMsg: Message = {
+            id: `${now + 1}`,
+            role: 'model',
+            content: `Imagen generada con **${meta.model}** (${PROVIDER_NAMES[meta.provider] || meta.provider}).`,
+            attachments: images.map((img, i) => ({ name: `imagen-${i + 1}.${img.mimeType.split('/')[1] || 'png'}`, type: img.mimeType, data: img.url })),
+            timestamp: now + 1,
+            rawDebug: { requestId: `img-${now}`, provider: meta.provider, model: meta.model, requestPayload: meta.logs?.request, responsePayload: meta.logs?.response }
+        };
+        setSessions(prev => prev.map(s => s.id === currentSessionId ? {
+            ...s,
+            title: s.messages.length === 0 ? `🖼️ ${prompt.slice(0, 28)}` : s.title,
+            messages: [...s.messages, userMsg, modelMsg]
+        } : s));
+    };
+
+    // --- Compartir / exportar ---
+    const handleImportChats = async (file: File) => {
+        try {
+            const imported = await importSessionsFromFile(file);
+            setSessions(prev => [...imported, ...prev]);
+            setCurrentSessionId(imported[0].id);
+            if (!settings.incognitoMode) {
+                for (const s of imported) await storageService.saveSession(s);
+            }
+            setIsManageModalOpen(false);
+            flash(`${imported.length} conversación(es) importada(s)`);
+        } catch (e: any) {
+            alert(e.message);
+        }
+    };
+
+    const handleShareMessage = async (msg: Message) => {
+        const outcome = await shareText(msg.content || '', currentSession.title);
+        if (outcome !== 'shared' && outcome !== 'cancelled') flash(shareOutcomeLabel[outcome]);
+    };
+
 
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1981,10 +2134,18 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                 isOpen={isManageModalOpen}
                 onClose={() => setIsManageModalOpen(false)}
                 onExport={handleExportChats}
+                onImport={handleImportChats}
                 onDeleteAll={handleDeleteAll}
                 storageUsage={storageUsage}
             />
 
+            <ImageGenModal
+                isOpen={isImageModalOpen}
+                onClose={() => setIsImageModalOpen(false)}
+                settings={settings}
+                onInsertInChat={handleInsertGeneratedImages}
+                onAttach={(atts) => setAttachments(prev => [...prev, ...atts])}
+            />
 
 
             <ToolApprovalModal
@@ -2032,7 +2193,7 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                                 const modelsListMap: Record<Provider, keyof AppSettings> = {
                                     groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
                                     cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
-                                    custom1: 'custom1ModelsList', custom2: 'custom2ModelsList'
+                                    custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
                                 };
                                 const models = settings[modelsListMap[modelsManagerProvider]] as string[];
                                 return (
@@ -2075,7 +2236,7 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                                             const modelsListMap: Record<Provider, keyof AppSettings> = {
                                                 groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
                                                 cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
-                                                custom1: 'custom1ModelsList', custom2: 'custom2ModelsList'
+                                                custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
                                             };
                                             const currentModels = settings[modelsListMap[modelsManagerProvider]] as string[];
                                             if (!currentModels.includes(newModelName.trim())) {
@@ -2111,6 +2272,7 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                 isOpen={showFileUploadModal}
                 onClose={() => setShowFileUploadModal(false)}
                 onSelectFile={() => document.getElementById('hidden-file-input')?.click()}
+                onFilesDropped={addFiles}
             />
 
             {/* MAIN CHAT AREA */}
@@ -2133,14 +2295,14 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                             const connectedMap: Record<Provider, keyof AppSettings> = {
                                 groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
                                 cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
-                                custom1: 'custom1Connected', custom2: 'custom2Connected'
+                                custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
                             };
                             const labels: Record<Provider, string> = {
                                 groq: 'Groq Cloud', openrouter: 'OpenRouter', openai: 'OpenAI',
                                 cerebras: 'Cerebras', gemini: 'Gemini', xai: 'xAI (Grok)',
-                                custom1: settings.custom1Name || 'Personalizado 1', custom2: settings.custom2Name || 'Personalizado 2'
+                                custom1: settings.custom1Name || 'Personalizado 1', custom2: settings.custom2Name || 'Personalizado 2', chatgpt: 'ChatGPT (cuenta)'
                             };
-                            const connectedProviders = (['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2'] as Provider[]).filter(p => settings[connectedMap[p]]);
+                            const connectedProviders = (['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'] as Provider[]).filter(p => settings[connectedMap[p]]);
 
                             return (
                                 <div className="relative">
@@ -2168,21 +2330,21 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                             const connectedMap: Record<Provider, keyof AppSettings> = {
                                 groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
                                 cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
-                                custom1: 'custom1Connected', custom2: 'custom2Connected'
+                                custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
                             };
-                            const hasConnectedProvider = (['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai'] as Provider[]).some(p => settings[connectedMap[p]]);
+                            const hasConnectedProvider = (['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'] as Provider[]).some(p => settings[connectedMap[p]]);
 
                             if (!hasConnectedProvider) return null;
 
                             const modelsListMap: Record<Provider, keyof AppSettings> = {
                                 groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
                                 cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
-                                custom1: 'custom1ModelsList', custom2: 'custom2ModelsList'
+                                custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
                             };
                             const modelMap: Record<Provider, keyof AppSettings> = {
                                 groq: 'groqModel', openrouter: 'openRouterModel', openai: 'openaiModel',
                                 cerebras: 'cerebrasModel', gemini: 'geminiModel', xai: 'xaiModel',
-                                custom1: 'custom1Model', custom2: 'custom2Model'
+                                custom1: 'custom1Model', custom2: 'custom2Model', chatgpt: 'chatgptModel'
                             };
                             const ap = settings.activeProvider;
                             return (
@@ -2210,12 +2372,42 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                             </button>
 
                             <button
-                                onClick={() => handleExportChats()}
-                                className="p-2 text-text-muted hover:text-text-main hover:bg-surface-highlight rounded-lg transition-colors"
-                                title="Exportar conversación"
+                                onClick={() => setIsImageModalOpen(true)}
+                                className="p-2 text-text-muted hover:text-purple-500 hover:bg-surface-highlight rounded-lg transition-colors"
+                                title="Generar imágenes"
                             >
-                                <Download size={20} />
+                                <Sparkles size={20} />
                             </button>
+
+                            <div className="relative">
+                                <button
+                                    onClick={() => setShowShareMenu(v => !v)}
+                                    disabled={currentSession.messages.length === 0}
+                                    className="p-2 text-text-muted hover:text-text-main hover:bg-surface-highlight rounded-lg transition-colors disabled:opacity-40"
+                                    title="Compartir / exportar esta conversación"
+                                >
+                                    <Share2 size={20} />
+                                </button>
+                                {showShareMenu && (
+                                    <>
+                                        <div className="fixed inset-0 z-20" onClick={() => setShowShareMenu(false)} />
+                                        <div className="absolute right-0 mt-2 w-64 bg-surface border border-border rounded-xl shadow-xl z-30 p-1.5 text-sm">
+                                            {[
+                                                { icon: <Share2 size={16} />, label: 'Compartir…', run: async () => { const o = await shareSession(currentSession); if (o !== 'shared' && o !== 'cancelled') flash(shareOutcomeLabel[o]); } },
+                                                { icon: <Copy size={16} />, label: 'Copiar como Markdown', run: async () => flash((await copyText(sessionToMarkdown(currentSession))) ? 'Copiado' : 'No se pudo copiar') },
+                                                { icon: <FileText size={16} />, label: 'Descargar Markdown (.md)', run: () => exportSessionMarkdown(currentSession, true) },
+                                                { icon: <FileJson size={16} />, label: 'Descargar JSON (re-importable)', run: () => exportSessionJSON(currentSession) },
+                                            ].map(item => (
+                                                <button key={item.label}
+                                                    onClick={() => { setShowShareMenu(false); item.run(); }}
+                                                    className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-text-main hover:bg-surface-highlight text-left">
+                                                    <span className="text-text-muted">{item.icon}</span>{item.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </>
+                                )}
+                            </div>
 
                             <button
                                 onClick={() => currentSession && setChatToDelete({ id: currentSession.id, title: currentSession.title || 'Chat actual' })}
@@ -2229,8 +2421,22 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                     </div>
                 </header>
 
-                {/* Messages */}
-                <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scrollbar-hide bg-background">
+                {/* Messages (acepta soltar archivos) */}
+                <div
+                    className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scrollbar-hide bg-background relative"
+                    onDragOver={(e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setIsDragging(true); } }}
+                    onDragLeave={(e) => { if (e.currentTarget === e.target) setIsDragging(false); }}
+                    onDrop={(e) => {
+                        e.preventDefault();
+                        setIsDragging(false);
+                        if (e.dataTransfer.files.length) addFiles(Array.from(e.dataTransfer.files));
+                    }}
+                >
+                    {isDragging && (
+                        <div className="sticky top-0 inset-x-0 h-full min-h-[200px] z-10 border-2 border-dashed border-primary bg-primary/10 rounded-2xl flex items-center justify-center pointer-events-none">
+                            <div className="flex items-center gap-2 text-primary font-semibold"><Upload size={22} /> Suelta los archivos para adjuntarlos</div>
+                        </div>
+                    )}
                     {currentSession.messages.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center text-center p-8 opacity-60">
                             <div className="w-20 h-20 bg-primary-light text-primary rounded-full flex items-center justify-center mb-6">
@@ -2246,99 +2452,141 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                             </p>
                         </div>
                     ) : (
-                        currentSession.messages.map((msg) => (
-                            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                <div className={`max-w-[90%] md:max-w-[80%] space-y-2`}>
-                                    <div className={`p-4 rounded-2xl shadow-sm ${msg.role === 'user'
-                                        ? 'bg-primary text-white rounded-br-none'
-                                        : msg.role === 'system'
-                                            ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200 border border-red-100 dark:border-red-800'
-                                            : 'bg-surface border border-border text-text-main rounded-bl-none'
-                                        }`}>
-                                        {msg.attachments && msg.attachments.length > 0 && (
-                                            <div className="flex gap-2 mb-3 overflow-x-auto pb-2">
-                                                {msg.attachments.map((att, i) => (
-                                                    <div key={i} className="relative group shrink-0">
-                                                        {att.type.startsWith('image/') ? (
-                                                            <img
-                                                                src={att.data}
-                                                                alt={att.name}
-                                                                className="h-20 w-20 object-cover rounded-lg border border-white/20"
-                                                                onError={(e) => {
-                                                                    const target = e.target as HTMLImageElement;
-                                                                    target.src = 'https://via.placeholder.com/80?text=Error';
-                                                                }}
-                                                            />
-                                                        ) : (
-                                                            <div className="h-20 w-20 bg-white/10 flex items-center justify-center rounded-lg border border-white/20" title={att.name}>
-                                                                <Paperclip size={20} />
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                        <div className="leading-relaxed">
-                                            {msg.role === 'model' || msg.role === 'assistant' ? (
-                                                <ReactMarkdown
-                                                    remarkPlugins={[remarkGfm]}
-                                                    components={{
-                                                        p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} />,
-                                                        a: ({ node, ...props }) => {
-                                                            // Auto-detect image links that look like images
-                                                            const isImage = /\.(jpeg|jpg|gif|png|webp|bmp|svg)($|\?)/i.test(props.href || '');
-                                                            if (isImage) {
-                                                                return <ChatImage src={props.href} alt="Imagen enlazada" onDownload={downloadImage} />;
-                                                            }
-                                                            return <a className="text-blue-500 hover:underline font-medium break-all" target="_blank" rel="noopener noreferrer" {...props} />;
-                                                        },
-                                                        ul: ({ node, ...props }) => <ul className="list-disc pl-5 mb-2 space-y-1" {...props} />,
-                                                        ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-2 space-y-1" {...props} />,
-                                                        li: ({ node, ...props }) => <li className="pl-1" {...props} />,
-                                                        h1: ({ node, ...props }) => <h1 className="text-xl font-bold mt-4 mb-2" {...props} />,
-                                                        h2: ({ node, ...props }) => <h2 className="text-lg font-bold mt-3 mb-2" {...props} />,
-                                                        h3: ({ node, ...props }) => <h3 className="text-base font-bold mt-2 mb-1" {...props} />,
-                                                        code: ({ node, ...props }) => {
-                                                            const match = /language-(\w+)/.exec(props.className || '');
-                                                            // Simple inline code vs block code
-                                                            const isInline = !match && !String(props.children).includes('\n');
-                                                            return isInline
-                                                                ? <code className="bg-surface-highlight dark:bg-black/30 px-1 py-0.5 rounded font-mono text-sm" {...props} />
-                                                                : <code className="block bg-gray-900 text-gray-100 p-3 rounded-lg overflow-x-auto font-mono text-sm my-2" {...props} />;
-                                                        },
-                                                        pre: ({ node, ...props }) => <pre className="bg-transparent p-0 m-0" {...props} />,
-                                                        table: ({ node, ...props }) => <div className="overflow-x-auto my-3 border border-border rounded-lg"><table className="w-full text-sm border-collapse" {...props} /></div>,
-                                                        thead: ({ node, ...props }) => <thead className="bg-surface-highlight text-text-muted font-semibold" {...props} />,
-                                                        th: ({ node, ...props }) => <th className="p-2 border-b border-r border-border last:border-r-0 text-left" {...props} />,
-                                                        td: ({ node, ...props }) => <td className="p-2 border-b border-r border-border last:border-r-0" {...props} />,
-                                                        blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-primary/50 pl-4 italic my-2 text-text-muted" {...props} />,
-                                                        img: ({ node, ...props }) => <ChatImage src={props.src} alt={props.alt} onDownload={downloadImage} />
-                                                    }}
-                                                >
-                                                    {msg.content || ""}
-                                                </ReactMarkdown>
-                                            ) : (
-                                                <p className="whitespace-pre-wrap">{msg.content}</p>
-                                            )}
+                        currentSession.messages.map((msg) => {
+                            // Resultados de herramientas MCP: tarjeta compacta
+                            if (msg.role === 'tool') {
+                                return (
+                                    <div key={msg.id} className="flex justify-start">
+                                        <div className="max-w-[90%] md:max-w-[80%] w-full md:w-auto md:min-w-[320px]">
+                                            <ToolResultCard message={msg} onDownload={downloadImage} />
                                         </div>
                                     </div>
-                                    <div className={`flex items-center gap-2 text-xs text-text-muted ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                        <span>{msg.role === 'user' ? 'Tú' : 'Nodemat AI'} • {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                                        {msg.usage && (
-                                            <span className="bg-surface-highlight px-1.5 py-0.5 rounded text-[10px] text-text-muted font-mono">
-                                                {msg.role === 'model' ? `⬇ ${msg.usage.input} | ⬆ ${msg.usage.output}` : ''}
-                                            </span>
+                                );
+                            }
+
+                            const isUser = msg.role === 'user';
+                            const isAssistant = msg.role === 'model' || msg.role === 'assistant';
+                            const onlyToolCalls = isAssistant && !!msg.toolCalls?.length && !msg.content;
+                            const imageAtts = msg.attachments?.filter(a => a.type.startsWith('image/')) || [];
+                            const fileAtts = msg.attachments?.filter(a => !a.type.startsWith('image/')) || [];
+
+                            return (
+                                <div key={msg.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[90%] md:max-w-[80%] space-y-2 group/msg`}>
+                                        <div className={`${onlyToolCalls ? 'p-0' : 'p-4 rounded-2xl shadow-sm'} ${onlyToolCalls ? '' : isUser
+                                            ? 'bg-primary text-white rounded-br-none'
+                                            : msg.role === 'system'
+                                                ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200 border border-red-100 dark:border-red-800'
+                                                : 'bg-surface border border-border text-text-main rounded-bl-none'
+                                            }`}>
+                                            {/* Adjuntos del usuario: miniaturas */}
+                                            {isUser && imageAtts.length > 0 && (
+                                                <div className="flex gap-2 mb-3 overflow-x-auto pb-2">
+                                                    {imageAtts.map((att, i) => (
+                                                        <a key={i} href="#" onClick={(e) => { e.preventDefault(); downloadImage(att.data, 'adjunto'); }} title={`${att.name} — clic para descargar`} className="shrink-0">
+                                                            <img src={att.data} alt={att.name} className="h-20 w-20 object-cover rounded-lg border border-white/20" />
+                                                        </a>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {fileAtts.length > 0 && (
+                                                <div className="flex flex-wrap gap-2 mb-3">
+                                                    {fileAtts.map((att, i) => (
+                                                        <button key={i} onClick={() => downloadAttachment(att)} title="Descargar"
+                                                            className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs border max-w-[220px] ${isUser ? 'bg-white/10 border-white/20' : 'bg-surface-highlight border-border'}`}>
+                                                            {att.type === 'application/pdf' ? <FileText size={16} /> : <Paperclip size={16} />}
+                                                            <span className="truncate">{att.name}</span>
+                                                            {att.size ? <span className="opacity-70 shrink-0">{formatBytes(att.size)}</span> : null}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+
+                                            <div className="leading-relaxed">
+                                                {isAssistant ? (
+                                                    <>
+                                                        {msg.content && (
+                                                            <ReactMarkdown
+                                                                remarkPlugins={[remarkGfm]}
+                                                                urlTransform={markdownUrlTransform}
+                                                                components={{
+                                                                    p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+                                                                    a: ({ node, ...props }) => {
+                                                                        // Auto-detect image links that look like images
+                                                                        const isImage = /\.(jpeg|jpg|gif|png|webp|bmp|svg)($|\?)/i.test(props.href || '');
+                                                                        if (isImage) {
+                                                                            return <ChatImage src={props.href} alt="Imagen enlazada" onDownload={downloadImage} />;
+                                                                        }
+                                                                        return <a className="text-blue-500 hover:underline font-medium break-all" target="_blank" rel="noopener noreferrer" {...props} />;
+                                                                    },
+                                                                    ul: ({ node, ...props }) => <ul className="list-disc pl-5 mb-2 space-y-1" {...props} />,
+                                                                    ol: ({ node, ...props }) => <ol className="list-decimal pl-5 mb-2 space-y-1" {...props} />,
+                                                                    li: ({ node, ...props }) => <li className="pl-1" {...props} />,
+                                                                    h1: ({ node, ...props }) => <h1 className="text-xl font-bold mt-4 mb-2" {...props} />,
+                                                                    h2: ({ node, ...props }) => <h2 className="text-lg font-bold mt-3 mb-2" {...props} />,
+                                                                    h3: ({ node, ...props }) => <h3 className="text-base font-bold mt-2 mb-1" {...props} />,
+                                                                    code: ({ node, ...props }) => {
+                                                                        const match = /language-(\w+)/.exec(props.className || '');
+                                                                        // Simple inline code vs block code
+                                                                        const isInline = !match && !String(props.children).includes('\n');
+                                                                        return isInline
+                                                                            ? <code className="bg-surface-highlight dark:bg-black/30 px-1 py-0.5 rounded font-mono text-sm" {...props} />
+                                                                            : <code className="block bg-gray-900 text-gray-100 p-3 rounded-lg overflow-x-auto font-mono text-sm my-2" {...props} />;
+                                                                    },
+                                                                    pre: ({ node, ...props }) => <pre className="bg-transparent p-0 m-0" {...props} />,
+                                                                    table: ({ node, ...props }) => <div className="overflow-x-auto my-3 border border-border rounded-lg"><table className="w-full text-sm border-collapse" {...props} /></div>,
+                                                                    thead: ({ node, ...props }) => <thead className="bg-surface-highlight text-text-muted font-semibold" {...props} />,
+                                                                    th: ({ node, ...props }) => <th className="p-2 border-b border-r border-border last:border-r-0 text-left" {...props} />,
+                                                                    td: ({ node, ...props }) => <td className="p-2 border-b border-r border-border last:border-r-0" {...props} />,
+                                                                    blockquote: ({ node, ...props }) => <blockquote className="border-l-4 border-primary/50 pl-4 italic my-2 text-text-muted" {...props} />,
+                                                                    img: ({ node, ...props }) => <ChatImage src={props.src} alt={props.alt} onDownload={downloadImage} />
+                                                                }}
+                                                            >
+                                                                {msg.content}
+                                                            </ReactMarkdown>
+                                                        )}
+                                                        {/* Imágenes generadas por el modelo */}
+                                                        {imageAtts.length > 0 && (
+                                                            <div className="flex flex-wrap gap-3">
+                                                                {imageAtts.map((att, i) => <ChatImage key={i} src={att.data} alt={att.name} onDownload={downloadImage} />)}
+                                                            </div>
+                                                        )}
+                                                        <ToolCallsBlock message={msg} />
+                                                    </>
+                                                ) : (
+                                                    <p className="whitespace-pre-wrap">{msg.content}</p>
+                                                )}
+                                            </div>
+                                        </div>
+                                        {!onlyToolCalls && (
+                                            <div className={`flex items-center gap-2 text-xs text-text-muted ${isUser ? 'justify-end' : 'justify-start'}`}>
+                                                <span>{isUser ? 'Tú' : msg.role === 'system' ? 'Sistema' : 'Nodemat AI'} • {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                                {msg.usage && isAssistant && (
+                                                    <span className="bg-surface-highlight px-1.5 py-0.5 rounded text-[10px] text-text-muted font-mono" title="Tokens de entrada | salida">
+                                                        ⬇ {msg.usage.input} | ⬆ {msg.usage.output}
+                                                    </span>
+                                                )}
+                                                {msg.content && msg.role !== 'system' && (
+                                                    <span className="flex items-center gap-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+                                                        <button onClick={async () => flash((await copyText(msg.content || '')) ? 'Copiado' : 'No se pudo copiar')} className="p-1 hover:text-text-main rounded" title="Copiar">
+                                                            <Copy size={12} />
+                                                        </button>
+                                                        <button onClick={() => handleShareMessage(msg)} className="p-1 hover:text-text-main rounded" title="Compartir">
+                                                            <Share2 size={12} />
+                                                        </button>
+                                                    </span>
+                                                )}
+                                            </div>
                                         )}
                                     </div>
                                 </div>
-                            </div>
-                        ))
+                            );
+                        })
                     )}
                     {isLoading && (
                         <div className="flex justify-start animate-pulse">
                             <div className="bg-surface p-4 rounded-2xl rounded-bl-none text-text-muted text-sm border border-border">
-                                Escribiendo...
+                                {pendingTool ? `Esperando tu aprobación para ${pendingTool.originalName}…` : 'Escribiendo...'}
                             </div>
                         </div>
                     )}
@@ -2354,10 +2602,12 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                                 {attachments.map((att, i) => (
                                     <div key={i} className="relative group shrink-0 animate-in zoom-in-90 duration-200">
                                         {att.type.startsWith('image/') ? (
-                                            <img src={att.data} alt={att.name} className="h-16 w-16 object-cover rounded-lg border border-border shadow-sm" />
+                                            <img src={att.data} alt={att.name} title={att.name} className="h-16 w-16 object-cover rounded-lg border border-border shadow-sm" />
                                         ) : (
-                                            <div className="h-16 w-16 bg-surface-highlight flex items-center justify-center rounded-lg border border-border text-xs text-text-muted font-medium p-1 text-center break-all shadow-sm">
-                                                {att.name.slice(0, 10)}...
+                                            <div className="h-16 w-28 bg-surface-highlight flex flex-col items-center justify-center gap-1 rounded-lg border border-border text-[10px] text-text-muted font-medium p-1 text-center shadow-sm" title={att.name}>
+                                                {att.type === 'application/pdf' ? <FileText size={18} className="text-red-500" /> : <FileCode size={18} />}
+                                                <span className="truncate w-full">{att.name}</span>
+                                                {att.size ? <span className="opacity-70">{formatBytes(att.size)}</span> : null}
                                             </div>
                                         )}
                                         <button
@@ -2395,7 +2645,7 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                                 <input
                                     type="file"
                                     multiple
-                                    accept="image/*,.txt,.csv,.json,.md"
+                                    accept={ACCEPT_ATTRIBUTE}
                                     onChange={handleFileUpload}
                                     className="hidden"
                                     id="hidden-file-input"
@@ -2406,21 +2656,32 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                                 value={input}
                                 onChange={(e) => setInput(e.target.value)}
                                 onKeyDown={handleKeyDown}
-                                placeholder="Escribe un mensaje..."
+                                onPaste={handlePaste}
+                                placeholder="Escribe un mensaje... (puedes pegar o soltar archivos)"
                                 className="flex-1 bg-transparent max-h-32 min-h-[44px] py-3 text-text-main placeholder-text-muted outline-none resize-none scrollbar-hide text-sm md:text-base leading-relaxed"
                                 rows={1}
                             />
 
-                            <button
-                                onClick={handleSend}
-                                disabled={!input.trim() && attachments.length === 0 || isLoading}
-                                className={`p-3 rounded-xl transition-all shadow-sm ${(!input.trim() && attachments.length === 0) || isLoading
-                                    ? 'bg-surface-highlight text-text-muted cursor-not-allowed'
-                                    : 'bg-primary text-white hover:bg-primary-hover hover:scale-105 active:scale-95'
-                                    }`}
-                            >
-                                {isLoading ? <RefreshCw className="animate-spin" size={20} /> : <Send size={20} />}
-                            </button>
+                            {isLoading ? (
+                                <button
+                                    onClick={handleStop}
+                                    className="p-3 rounded-xl transition-all shadow-sm bg-text-main text-text-inverted hover:opacity-90"
+                                    title="Detener"
+                                >
+                                    <Square size={20} />
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={handleSend}
+                                    disabled={!input.trim() && attachments.length === 0}
+                                    className={`p-3 rounded-xl transition-all shadow-sm ${!input.trim() && attachments.length === 0
+                                        ? 'bg-surface-highlight text-text-muted cursor-not-allowed'
+                                        : 'bg-primary text-white hover:bg-primary-hover hover:scale-105 active:scale-95'
+                                        }`}
+                                >
+                                    <Send size={20} />
+                                </button>
+                            )}
                         </div>
                     </div>
 
@@ -2433,6 +2694,12 @@ const isConnected = settings[connectedMap[settings.activeProvider]];
                     </div>
                 </div>
             </div>
+
+            {toast && (
+                <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[130] bg-black/85 text-white text-sm px-4 py-2 rounded-full shadow-lg">
+                    {toast}
+                </div>
+            )}
         </div>
 
     );

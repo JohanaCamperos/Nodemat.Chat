@@ -1,4 +1,4 @@
-export type Provider = 'groq' | 'openrouter' | 'openai' | 'cerebras' | 'gemini' | 'xai' | 'custom1' | 'custom2';
+export type Provider = 'groq' | 'openrouter' | 'openai' | 'cerebras' | 'gemini' | 'xai' | 'custom1' | 'custom2' | 'chatgpt';
 
 export interface Message {
   id: string;
@@ -6,9 +6,18 @@ export interface Message {
   content: string | null;
   timestamp: number;
   attachments?: Attachment[];
-  toolCalls?: any[];
+  toolCalls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
+  // Solo para role 'tool': metadatos para la UI
+  toolMeta?: {
+    serverName: string;
+    originalName: string;
+    args: any;
+    isError: boolean;
+    denied?: boolean;
+    durationMs?: number;
+  };
   usage?: {
     input: number;
     output: number;
@@ -26,8 +35,22 @@ export interface Message {
 export interface Attachment {
   name: string;
   type: string;
-  data: string; // Base64 or Text
+  data: string; // Data URL (imágenes, PDF) o texto plano
   extractedText?: string;
+  size?: number;
+}
+
+/**
+ * Tool call en formato normalizado (estilo OpenAI).
+ * `thought_signature` solo lo usa Gemini 3: hay que devolverlo tal cual en el
+ * siguiente turno o la API rechaza la conversación. Se elimina antes de enviar
+ * el historial a proveedores OpenAI-compatibles.
+ */
+export interface ToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
+  thought_signature?: string;
 }
 
 export interface ChatSession {
@@ -37,25 +60,46 @@ export interface ChatSession {
   createdAt: number;
 }
 
-export type MCPTransport = 'sse' | 'http-stream';
+/**
+ * - 'auto': prueba Streamable HTTP (spec 2025-03-26+) y si falla cae a SSE legacy.
+ * - 'http-stream': Streamable HTTP (un solo endpoint, POST + respuestas JSON o SSE).
+ * - 'sse': transporte HTTP+SSE legacy (spec 2024-11-05: GET /sse + POST al endpoint anunciado).
+ */
+export type MCPTransport = 'auto' | 'sse' | 'http-stream';
 export type MCPAuthType = 'none' | 'api-key' | 'oauth';
 
 export interface MCPTool {
   name: string;
+  title?: string;
   description?: string;
   inputSchema: any;
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 export interface MCPServer {
   id: string;
+  name?: string;              // Alias opcional elegido por el usuario
   url: string;
   transport: MCPTransport;
   authType: MCPAuthType;
   authToken: string;
+  authHeader?: string;        // Header para api-key (default: Authorization: Bearer)
   status: 'idle' | 'loading' | 'connected' | 'error';
   errorMessage: string;
   tools: MCPTool[];
   enabledTools: string[];
+  autoApprove?: boolean;      // Ejecutar herramientas sin pedir confirmación
+  useProxy?: boolean;         // Conectar a través de /api/mcp (evita CORS, ej. n8n Cloud)
+  // Información obtenida en el handshake `initialize`
+  serverInfo?: { name: string; version?: string };
+  protocolVersion?: string;
+  resolvedTransport?: 'http-stream' | 'sse' | 'legacy-post';
+  instructions?: string;
 }
 
 export type ThemeOption = 'ocean' | 'mint' | 'lavender' | 'coral' | 'amber' | 'rose' | 'teal' | 'slate';
@@ -121,6 +165,20 @@ export interface AppSettings {
   custom2Connected: boolean;
   custom2ModelsList: string[];
 
+  // Cuenta de ChatGPT (experimental, vía /api/chatgpt). chatgptKey = access token.
+  chatgptKey: string;
+  chatgptRefreshToken: string;
+  chatgptAccountId: string;
+  chatgptExpiresAt: number;
+  chatgptEmail: string;
+  chatgptPlan: string;
+  chatgptModel: string;
+  chatgptConnected: boolean;
+  chatgptModelsList: string[];
+
+  // Token compartido con las funciones /api (NODEMAT_PROXY_TOKEN en Vercel)
+  proxyToken: string;
+
   // System Prompt
   systemPrompt: string;
 
@@ -147,6 +205,7 @@ export const PROVIDER_NAMES: Record<Provider, string> = {
   gemini: 'Gemini (AI Studio)',
   xai: 'xAI (Grok)',
   custom1: 'Personalizado 1',
-  custom2: 'Personalizado 2'
+  custom2: 'Personalizado 2',
+  chatgpt: 'ChatGPT (cuenta)'
 
 };

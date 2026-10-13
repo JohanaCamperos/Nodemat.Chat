@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.env.local
+*.local
+# Volcados de depuración / backups de chats (pueden contener datos personales)
+pedidoimagen.json
+nexus_*.json
+nodemat_*.json

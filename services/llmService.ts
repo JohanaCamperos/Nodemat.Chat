@@ -2,32 +2,36 @@
  * ============================================================================
  * LLM SERVICE - Language Model API Orchestrator
  * ============================================================================
- * 
+ *
  * Este servicio orquesta todas las comunicaciones con los proveedores de LLM.
  * Proporciona una interfaz unificada para:
- * 
+ *
  * - Enviar mensajes a múltiples proveedores (Groq, OpenRouter, OpenAI, etc.)
- * - Ejecutar herramientas MCP (Model Context Protocol)
+ * - Ejecutar herramientas MCP (Model Context Protocol) -> ver mcpClient.ts
  * - Manejar el ciclo de vida de una conversación con tool calling
- * 
+ *
  * ARQUITECTURA:
  * - Todas las llamadas API se hacen directamente desde el navegador
  * - No hay backend intermedio (Zero-Knowledge Architecture)
  * - Las API keys se transmiten únicamente al proveedor seleccionado
- * 
+ *
  * SEGURIDAD:
  * - Las keys NUNCA se loguean ni se almacenan fuera del navegador
  * - CORS puede bloquear algunas APIs (ej: Anthropic), usar fallback models
  * - Las ejecuciones MCP requieren aprobación explícita del usuario
- * 
+ *   (salvo que el usuario marque el servidor como "auto-aprobar")
+ *
  * EDUCATIVO:
  * Este archivo es ideal para aprender cómo funcionan las APIs de LLM:
  * - Estructura de mensajes (roles: system, user, assistant, tool)
- * - Tool calling / Function calling
- * - Manejo de respuestas streaming vs batch
+ * - Tool calling / Function calling (formato OpenAI vs formato Gemini)
+ * - Contenido multimodal (imágenes y PDFs de entrada, imágenes de salida)
  */
 
-import { AppSettings, Message, Provider, MCPTool, MCPServer, Attachment } from "../types";
+import { AppSettings, Message, Provider, MCPTool, MCPServer, Attachment, ToolCall } from "../types";
+import { callServerTool, connectServer, getFriendlyMCPError, readSSE } from "./mcpClient";
+import { bridgeHeaders, CHATGPT_BRIDGE_PATH } from "./bridge";
+import { ensureFreshChatGPTToken } from "./chatgptAuth";
 
 // ============================================================================
 // PROVIDER ENDPOINTS
@@ -67,7 +71,9 @@ const PROVIDER_ENDPOINTS: Record<Provider, { chat: string; models: string }> = {
     },
     // Proveedores personalizados - URLs se configuran dinámicamente
     custom1: { chat: '', models: '' },
-    custom2: { chat: '', models: '' }
+    custom2: { chat: '', models: '' },
+    // Cuenta de ChatGPT: pasa por /api/chatgpt (ver callChatGPT más abajo)
+    chatgpt: { chat: '', models: '' }
 };
 
 /**
@@ -75,102 +81,22 @@ const PROVIDER_ENDPOINTS: Record<Provider, { chat: string; models: string }> = {
  * Útil para UX más rápida y cuando CORS bloquea la petición inicial.
  */
 const FALLBACK_MODELS: Partial<Record<Provider, string[]>> = {
-    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo', 'o1-preview', 'o1-mini'],
-    gemini: ['gemini-2.0-flash-exp', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'],
+    openai: ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
+    gemini: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
     custom1: [],
     custom2: []
 };
 
-// ============================================================================
-// ERROR HANDLING
-// ============================================================================
+/** Proveedores que aceptan PDFs de forma nativa en el chat */
+const PDF_NATIVE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt'];
 
-/**
- * Traduce errores técnicos de MCP a mensajes amigables para el usuario.
- * 
- * @param error - El error original capturado
- * @returns Mensaje de error legible en español con sugerencias de solución
- */
-const getFriendlyMCPError = (error: any): string => {
-    const msg = error.message || error.toString();
+/** Máximo de rondas LLM <-> herramientas por mensaje del usuario */
+const MAX_TOOL_TURNS = 8;
 
-    if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('ECONNREFUSED')) {
-        return "⚠️ No pudimos encontrar tu servidor.\n\n" +
-            "Por favor revisa:\n" +
-            "1. ¿Está tu servidor 'corriendo' o encendido en la terminal?\n" +
-            "2. ¿La URL (ej. http://localhost:8000/sse) es exactamente la correcta?\n" +
-            "3. (Avanzado) ¿Tu servidor permite conexiones externas (CORS)?";
-    }
-    if (msg.includes('401') || msg.includes('403')) return "🔒 Acceso denegado. Revisa tus credenciales.";
-    if (msg.includes('404')) return "🔍 URL incompleta o incorrecta. ¿Falta '/messages' al final?";
-    if (msg.includes('500')) return "💥 El servidor tuvo un problema interno al ejecutar la herramienta.";
-    if (msg.includes('JSON') || msg.includes('Invalid response')) return "🤔 El servidor devolvió una respuesta inválida.";
+const uid = () => (crypto as any).randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-    return `Ocurrió un error inesperado: "${msg}".`;
-};
-
-// ============================================================================
-// MCP (MODEL CONTEXT PROTOCOL) EXECUTION
-// ============================================================================
-
-/**
- * Ejecuta una herramienta MCP en un servidor local del usuario.
- * 
- * MCP permite que la IA ejecute funciones en el entorno local:
- * - Consultar bases de datos
- * - Ejecutar comandos de terminal
- * - Acceder al sistema de archivos
- * 
- * SEGURIDAD: Esta función solo se ejecuta después de que el usuario
- * aprueba explícitamente la ejecución mediante el ToolApprovalModal.
- * 
- * @param server - Configuración del servidor MCP (URL, auth token)
- * @param toolName - Nombre de la herramienta a ejecutar
- * @param args - Argumentos para la herramienta (varían según la tool)
- * @returns Resultado de la ejecución como string
- */
-const executeMCPToolCall = async (server: MCPServer, toolName: string, args: any): Promise<any> => {
-    const rpcUrl = server.url;
-
-    // Construir headers con autenticación opcional
-    const headers: any = { 'Content-Type': 'application/json' };
-    if (server.authToken) headers['Authorization'] = `Bearer ${server.authToken}`;
-
-    // Payload JSON-RPC 2.0 estándar para MCP
-    const payload = {
-        jsonrpc: "2.0",
-        id: Date.now(), // ID único para correlación
-        method: "tools/call",
-        params: {
-            name: toolName,
-            arguments: args
-        }
-    };
-
-    const response = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`MCP Server Error (${response.status}): ${text}`);
-    }
-
-    const data = await response.json();
-
-    // Manejar errores de nivel JSON-RPC
-    if (data.error) throw new Error(data.error.message);
-
-    // Extraer contenido de la respuesta según formato MCP
-    if (data.result && data.result.content) {
-        const textParts = data.result.content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
-        return textParts;
-    }
-
-    return JSON.stringify(data.result || data);
-};
+// Re-export para compatibilidad con código existente
+export { getFriendlyMCPError };
 
 // ============================================================================
 // API CALLS - MODEL FETCHING
@@ -178,14 +104,9 @@ const executeMCPToolCall = async (server: MCPServer, toolName: string, args: any
 
 /**
  * Obtiene la lista de modelos disponibles para un proveedor.
- * 
+ *
  * EDUCATIVO: Esta función demuestra cómo cada proveedor tiene
  * formatos de respuesta ligeramente diferentes para su API de models.
- * 
- * @param provider - El proveedor de IA
- * @param key - API key del proveedor
- * @param customUrl - URL base para proveedores personalizados
- * @returns Array de IDs de modelos disponibles
  */
 export const fetchModels = async (provider: Provider, key: string, customUrl?: string): Promise<string[]> => {
     try {
@@ -193,7 +114,7 @@ export const fetchModels = async (provider: Provider, key: string, customUrl?: s
 
         // Para proveedores custom, usar la URL proporcionada
         if ((provider === 'custom1' || provider === 'custom2') && customUrl) {
-            endpoint = `${customUrl}/models`;
+            endpoint = `${customUrl.replace(/\/+$/, '')}/models`;
         }
 
         if (!endpoint) {
@@ -201,12 +122,12 @@ export const fetchModels = async (provider: Provider, key: string, customUrl?: s
         }
 
         let headers: Record<string, string> = {};
-        let url = endpoint;
 
         // Configuración específica de autenticación por proveedor
         if (provider === 'gemini') {
-            // Gemini usa query param en lugar de header
-            url = `${endpoint}?key=${key}`;
+            // Gemini acepta la key en un header propio (mejor que en la URL: no queda en logs)
+            headers = { 'x-goog-api-key': key };
+            endpoint += '?pageSize=1000';
         } else {
             headers = { 'Authorization': `Bearer ${key}` };
             if (provider === 'openrouter') {
@@ -215,7 +136,7 @@ export const fetchModels = async (provider: Provider, key: string, customUrl?: s
             }
         }
 
-        const response = await fetch(url, { method: 'GET', headers });
+        const response = await fetch(endpoint, { method: 'GET', headers });
 
         if (!response.ok) {
             // API falló, usar modelos de respaldo
@@ -241,32 +162,143 @@ export const fetchModels = async (provider: Provider, key: string, customUrl?: s
 
 /**
  * Conecta a un servidor MCP y obtiene la lista de herramientas disponibles.
- * 
- * @param url - URL del servidor MCP
- * @param transport - Tipo de transporte (sse, stdio)
- * @param authType - Tipo de autenticación
- * @param token - Token de autenticación
- * @returns Array de definiciones de herramientas MCP
+ * (Wrapper de compatibilidad: la lógica real vive en mcpClient.ts)
  */
 export const connectToMCP = async (url: string, transport: string, authType: string, token: string): Promise<MCPTool[]> => {
-    const headers: any = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await connectServer({
+        id: `adhoc-${url}`, url, transport: transport as any, authType: authType as any, authToken: token,
+        status: 'idle', errorMessage: '', tools: [], enabledTools: []
+    });
+    return res.tools;
+};
 
-    try {
-        const payload = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
-        const response = await fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(payload) });
+// ============================================================================
+// TOOLS: del catálogo MCP a "function definitions" para el LLM
+// ============================================================================
 
-        if (!response.ok) throw new Error(`Server status ${response.status}`);
-        const data = await response.json();
+interface ToolBinding {
+    server: MCPServer;
+    originalName: string;
+    tool: MCPTool;
+}
 
-        if (data.error) throw new Error(`MCP Error: ${data.error.message}`);
-        if (data.result && data.result.tools) return data.result.tools;
-        if (Array.isArray(data)) return data;
+/**
+ * Los LLMs exigen nombres de función `^[a-zA-Z0-9_-]{1,64}$` y únicos.
+ * Dos servidores MCP pueden exponer la misma herramienta (ej. "search"),
+ * así que si hay colisión prefijamos con el nombre del servidor.
+ */
+const buildToolRegistry = (servers: MCPServer[]) => {
+    const bindings: Record<string, ToolBinding> = {};
+    const defs: any[] = [];
+    const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64) || 'tool';
 
-        throw new Error("Invalid response format.");
-    } catch (e) {
-        throw e;
+    servers.forEach((server, idx) => {
+        if (server.status !== 'connected') return;
+        const prefix = sanitize(server.name || server.serverInfo?.name || `mcp${idx + 1}`).slice(0, 20);
+
+        server.tools
+            .filter(t => server.enabledTools.includes(t.name))
+            .forEach(tool => {
+                let exposed = sanitize(tool.name);
+                if (bindings[exposed]) exposed = sanitize(`${prefix}__${tool.name}`);
+                let n = 2;
+                while (bindings[exposed]) exposed = sanitize(`${prefix}__${tool.name}`).slice(0, 60) + `_${n++}`;
+
+                bindings[exposed] = { server, originalName: tool.name, tool };
+
+                const schema = tool.inputSchema && typeof tool.inputSchema === 'object'
+                    ? { ...tool.inputSchema }
+                    : { type: 'object', properties: {} };
+                if (!schema.type) schema.type = 'object';
+                delete schema.$schema;
+
+                defs.push({
+                    type: "function",
+                    function: {
+                        name: exposed,
+                        description: (tool.description || tool.title || '').slice(0, 1024),
+                        parameters: schema
+                    }
+                });
+            });
+    });
+
+    return { bindings, defs };
+};
+
+// ============================================================================
+// MENSAJES: del historial de la app al formato de la API (estilo OpenAI)
+// ============================================================================
+
+/** Quita imágenes base64 embebidas en markdown: reenviarlas como texto costaría miles de tokens. */
+const stripDataUrls = (text: string | null) =>
+    (text || '').replace(/!\[([^\]]*)\]\(data:[^)]+\)/g, '[imagen: $1]');
+
+/**
+ * Construye el `content` de un mensaje de usuario con adjuntos.
+ * - Imágenes -> `image_url` (todos los proveedores con visión)
+ * - PDF      -> `file` (OpenAI / OpenRouter) o inlineData (Gemini)
+ * - Texto    -> se pega inline en el prompt
+ */
+const buildUserContent = (text: string, attachments: Attachment[] | undefined, provider: Provider) => {
+    if (!attachments || attachments.length === 0) return text;
+
+    const parts: any[] = [{ type: "text", text: text || "" }];
+    attachments.forEach(att => {
+        if (att.type.startsWith('image/')) {
+            parts.push({ type: "image_url", image_url: { url: att.data } });
+        } else if (att.type === 'application/pdf') {
+            if (PDF_NATIVE_PROVIDERS.includes(provider)) {
+                parts.push({ type: "file", file: { filename: att.name, file_data: att.data } });
+            } else {
+                parts[0].text += `\n\n[Adjunto PDF "${att.name}" omitido: este proveedor no acepta PDFs. Usa OpenAI, OpenRouter o Gemini.]`;
+            }
+        } else {
+            parts[0].text += `\n\n--- Archivo Adjunto: ${att.name} ---\n${att.data}\n-------------------`;
+        }
+    });
+    return parts;
+};
+
+/**
+ * Convierte el historial de la app a mensajes de API.
+ * Además "repara" historiales inconsistentes: si un assistant pidió tools
+ * pero falta alguna respuesta (p. ej. el usuario canceló), agregamos una
+ * respuesta sintética, porque todas las APIs rechazan tool_calls huérfanos.
+ */
+const toApiMessages = (history: Message[], provider: Provider): any[] => {
+    const out: any[] = [];
+
+    for (let i = 0; i < history.length; i++) {
+        const m = history[i];
+
+        if (m.role === 'user') {
+            out.push({ role: 'user', content: buildUserContent(m.content || '', m.attachments, provider) });
+        } else if (m.role === 'model' || m.role === 'assistant') {
+            const msg: any = { role: 'assistant', content: stripDataUrls(m.content) };
+            if (m.toolCalls && m.toolCalls.length > 0) {
+                msg.tool_calls = m.toolCalls;
+                out.push(msg);
+
+                // Recolectar las respuestas que siguen
+                const answered = new Set<string>();
+                while (history[i + 1]?.role === 'tool') {
+                    const t = history[++i];
+                    answered.add(t.tool_call_id || '');
+                    out.push({ role: 'tool', tool_call_id: t.tool_call_id, name: t.name, content: t.content || '' });
+                }
+                m.toolCalls.forEach(tc => {
+                    if (!answered.has(tc.id)) {
+                        out.push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: 'Ejecución interrumpida (sin resultado).' });
+                    }
+                });
+            } else if (msg.content) {
+                out.push(msg);
+            }
+        }
+        // 'system' (errores mostrados en UI) y 'tool' sueltos se ignoran
     }
+    return out;
 };
 
 // ============================================================================
@@ -275,79 +307,103 @@ export const connectToMCP = async (url: string, transport: string, authType: str
 
 /**
  * Construye el payload de request específico para Google Gemini.
- * 
+ *
  * EDUCATIVO: Gemini usa un formato diferente a OpenAI:
- * - 'contents' en lugar de 'messages'
- * - 'parts' para contenido multimodal
+ * - 'contents' en lugar de 'messages', roles 'user' y 'model'
+ * - 'parts' para contenido multimodal (text, inlineData, functionCall, functionResponse)
  * - 'systemInstruction' separado del array de contenidos
- * 
- * @param apiMessages - Array de mensajes en formato OpenAI
- * @param tools - Definiciones de herramientas
- * @returns Payload formateado para la API de Gemini
+ * - Las llamadas a herramientas son parts `functionCall` y sus resultados
+ *   parts `functionResponse` (no existe el rol 'tool')
+ * - Gemini 3 exige devolver la `thoughtSignature` de cada functionCall
  */
 const buildGeminiRequest = (apiMessages: any[], tools: any[]) => {
-    const contents = apiMessages
-        .filter(m => m.role !== 'system')
-        .map(m => {
-            const parts: any[] = [];
+    const contents: any[] = [];
 
-            if (typeof m.content === 'string') {
-                parts.push({ text: m.content });
-            } else if (Array.isArray(m.content)) {
-                m.content.forEach((c: any) => {
-                    if (c.type === 'text') {
-                        parts.push({ text: c.text });
-                    } else if (c.type === 'image_url') {
-                        // Extraer base64 y mime de Data URL
-                        const url = c.image_url?.url || "";
-                        const match = url.match(/^data:([^;]+);base64,(.+)$/);
-                        if (match) {
-                            const mimeType = match[1];
-                            const data = match[2];
+    const push = (role: 'user' | 'model', parts: any[]) => {
+        if (parts.length === 0) return;
+        const last = contents[contents.length - 1];
+        // Gemini exige alternar roles: fusionamos mensajes consecutivos del mismo rol
+        if (last && last.role === role) last.parts.push(...parts);
+        else contents.push({ role, parts });
+    };
 
-                            if (mimeType.startsWith('image/')) {
-                                parts.push({
-                                    inlineData: {
-                                        mimeType: mimeType,
-                                        data: data
-                                    }
-                                });
-                            }
-                        }
-                    }
+    const dataUrlToInline = (url: string) => {
+        const match = (url || '').match(/^data:([^;]+);base64,(.+)$/);
+        return match ? { inlineData: { mimeType: match[1], data: match[2] } } : null;
+    };
+
+    apiMessages.forEach(m => {
+        if (m.role === 'system') return;
+
+        if (m.role === 'tool') {
+            // Si Gemini asignó un id a la functionCall, hay que devolverlo en la respuesta
+            const hasRealId = m.tool_call_id && !String(m.tool_call_id).startsWith('gemini-');
+            push('user', [{
+                functionResponse: { name: m.name, ...(hasRealId ? { id: m.tool_call_id } : {}), response: { result: m.content } }
+            }]);
+            return;
+        }
+
+        const parts: any[] = [];
+        if (typeof m.content === 'string') {
+            if (m.content) parts.push({ text: m.content });
+        } else if (Array.isArray(m.content)) {
+            m.content.forEach((c: any) => {
+                if (c.type === 'text' && c.text) parts.push({ text: c.text });
+                else if (c.type === 'image_url') { const p = dataUrlToInline(c.image_url?.url); if (p) parts.push(p); }
+                else if (c.type === 'file') { const p = dataUrlToInline(c.file?.file_data); if (p) parts.push(p); }
+            });
+        }
+
+        if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+            m.tool_calls.forEach((tc: ToolCall) => {
+                let args = {};
+                try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* args vacíos */ }
+                parts.push({
+                    functionCall: { name: tc.function.name, args },
+                    ...(tc.thought_signature ? { thoughtSignature: tc.thought_signature } : {})
                 });
-            }
+            });
+        }
 
-            return {
-                role: m.role === 'assistant' ? 'model' : 'user',
-                parts: parts
-            };
-        });
+        push(m.role === 'assistant' ? 'model' : 'user', parts);
+    });
 
     const systemInstruction = apiMessages.find(m => m.role === 'system')?.content;
 
     return {
         contents,
         ...(systemInstruction ? { systemInstruction: { parts: [{ text: systemInstruction }] } } : {}),
-        ...(tools.length > 0 ? { tools: [{ functionDeclarations: tools.map(t => t.function) }] } : {})
+        ...(tools.length > 0 ? {
+            tools: [{
+                // parametersJsonSchema acepta JSON Schema completo (lo que devuelven los servidores MCP)
+                functionDeclarations: tools.map(t => ({
+                    name: t.function.name,
+                    description: t.function.description,
+                    parametersJsonSchema: t.function.parameters
+                }))
+            }]
+        } : {})
     };
 };
 
+/** Los proveedores OpenAI-compatibles no conocen `thought_signature`. */
+const toOpenAIMessages = (apiMessages: any[]) => apiMessages.map(m => {
+    if (!m.tool_calls) return m;
+    return {
+        ...m,
+        content: m.content || null,
+        tool_calls: m.tool_calls.map(({ thought_signature, ...tc }: ToolCall) => tc)
+    };
+});
+
 /**
  * Realiza la llamada HTTP al proveedor de LLM seleccionado.
- * 
+ *
  * EDUCATIVO: Esta función abstrae las diferencias entre proveedores:
- * - Gemini: URL con modelo, key en query param
+ * - Gemini: URL con modelo, key en header x-goog-api-key
  * - OpenAI/Groq/etc: Bearer token, formato estándar
  * - Custom: URL configurable, formato OpenAI-compatible
- * 
- * @param provider - Proveedor seleccionado
- * @param key - API key
- * @param model - ID del modelo a usar
- * @param apiMessages - Historial de mensajes
- * @param tools - Definiciones de herramientas
- * @param settings - Configuración de la app
- * @returns Objeto con data de respuesta y payload original (para debug)
  */
 const callLLMProvider = async (
     provider: Provider,
@@ -355,35 +411,32 @@ const callLLMProvider = async (
     model: string,
     apiMessages: any[],
     tools: any[],
-    settings: AppSettings
+    settings: AppSettings,
+    signal?: AbortSignal
 ) => {
     let endpoint = PROVIDER_ENDPOINTS[provider].chat;
-    let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     let requestPayload: any;
 
     // Configuración específica por proveedor
     if (provider === 'gemini') {
-        endpoint = endpoint.replace('{model}', model) + `?key=${key}`;
+        endpoint = endpoint.replace('{model}', encodeURIComponent(model));
+        headers['x-goog-api-key'] = key;
         requestPayload = buildGeminiRequest(apiMessages, tools);
-    } else if (provider === 'custom1' || provider === 'custom2') {
-        const customUrl = provider === 'custom1' ? settings.custom1Url : settings.custom2Url;
-        endpoint = `${customUrl}/chat/completions`;
-        headers['Authorization'] = `Bearer ${key}`;
-        requestPayload = {
-            model: model,
-            messages: apiMessages,
-            tools: tools.length > 0 ? tools : undefined,
-            tool_choice: tools.length > 0 ? "auto" : undefined
-        };
     } else {
+        if (provider === 'custom1' || provider === 'custom2') {
+            const customUrl = provider === 'custom1' ? settings.custom1Url : settings.custom2Url;
+            endpoint = `${customUrl.replace(/\/+$/, '')}/chat/completions`;
+        }
         // Formato estándar OpenAI-compatible
         headers['Authorization'] = `Bearer ${key}`;
         if (provider === 'openrouter') {
             headers['HTTP-Referer'] = window.location.origin;
+            headers['X-Title'] = 'Nodemat Chat';
         }
         requestPayload = {
             model: model,
-            messages: apiMessages,
+            messages: toOpenAIMessages(apiMessages),
             tools: tools.length > 0 ? tools : undefined,
             tool_choice: tools.length > 0 ? "auto" : undefined
         };
@@ -392,12 +445,20 @@ const callLLMProvider = async (
     const response = await fetch(endpoint, {
         method: 'POST',
         headers,
-        body: JSON.stringify(requestPayload)
+        body: JSON.stringify(requestPayload),
+        signal
     });
 
     if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error?.message || err.message || "API Error");
+        const text = await response.text();
+        let msg = `API Error ${response.status}`;
+        try {
+            const err = JSON.parse(text);
+            msg = err.error?.message || err.message || msg;
+        } catch {
+            if (text) msg += `: ${text.slice(0, 300)}`;
+        }
+        throw new Error(msg);
     }
 
     const responseData = await response.json();
@@ -408,26 +469,221 @@ const callLLMProvider = async (
 // RESPONSE PARSERS
 // ============================================================================
 
+interface ParsedResponse {
+    content: string;
+    toolCalls?: ToolCall[];
+    images: Attachment[];
+}
+
 /**
  * Parsea la respuesta de Google Gemini a un formato unificado.
- * 
- * @param data - Respuesta raw de la API de Gemini
- * @returns Objeto con contenido de texto y optional tool calls
+ * Incluye imágenes generadas (inlineData) por modelos como gemini-2.5-flash-image.
  */
-const parseGeminiResponse = (data: any): { content: string; toolCalls?: any[] } => {
+const parseGeminiResponse = (data: any): ParsedResponse => {
     const candidate = data.candidates?.[0];
-    const parts = candidate?.content?.parts || [];
+    const parts: any[] = candidate?.content?.parts || [];
 
-    const textParts = parts.filter((p: any) => p.text).map((p: any) => p.text);
-    const functionCalls = parts.filter((p: any) => p.functionCall);
+    if (!candidate) {
+        const reason = data.promptFeedback?.blockReason;
+        throw new Error(reason ? `Gemini bloqueó el mensaje (${reason}).` : 'Gemini no devolvió candidatos.');
+    }
 
+    const textParts = parts.filter(p => p.text && !p.thought).map(p => p.text);
+    const images: Attachment[] = parts
+        .filter(p => p.inlineData?.mimeType?.startsWith('image/'))
+        .map((p, i) => ({
+            name: `gemini-image-${i + 1}.${p.inlineData.mimeType.split('/')[1]}`,
+            type: p.inlineData.mimeType,
+            data: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}`
+        }));
+
+    const functionCalls = parts.filter(p => p.functionCall);
     return {
         content: textParts.join('\n'),
-        toolCalls: functionCalls.length > 0 ? functionCalls.map((fc: any) => ({
-            id: `gemini-${Date.now()}`,
-            type: 'function',
-            function: { name: fc.functionCall.name, arguments: JSON.stringify(fc.functionCall.args) }
+        images,
+        toolCalls: functionCalls.length > 0 ? functionCalls.map((p, i) => ({
+            id: p.functionCall.id || `gemini-${Date.now()}-${i}`,
+            type: 'function' as const,
+            function: { name: p.functionCall.name, arguments: JSON.stringify(p.functionCall.args || {}) },
+            ...(p.thoughtSignature ? { thought_signature: p.thoughtSignature } : {})
         })) : undefined
+    };
+};
+
+/**
+ * Parsea respuestas OpenAI-compatibles.
+ * OpenRouter devuelve imágenes generadas en `choices[0].message.images`
+ * como `{ type: 'image_url', image_url: { url: 'data:image/png;base64,...' } }`.
+ */
+const parseOpenAIResponse = (data: any): ParsedResponse => {
+    const choice = data.choices?.[0];
+    if (!choice) throw new Error(data.error?.message || 'La API no devolvió ninguna respuesta (choices vacío).');
+    const message = choice.message || {};
+
+    let content = '';
+    if (typeof message.content === 'string') content = message.content;
+    else if (Array.isArray(message.content)) {
+        content = message.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n');
+    }
+
+    const rawImages: any[] = message.images || choice.images || [];
+    const images: Attachment[] = rawImages
+        .map((img: any) => img?.image_url?.url || img?.url)
+        .filter(Boolean)
+        .map((url: string, i: number) => {
+            const mime = url.match(/^data:([^;]+);/)?.[1] || 'image/png';
+            return { name: `imagen-${i + 1}.${mime.split('/')[1] || 'png'}`, type: mime, data: url };
+        });
+
+    return {
+        content,
+        images,
+        toolCalls: message.tool_calls?.length ? message.tool_calls : undefined
+    };
+};
+
+// ============================================================================
+// CHATGPT (CUENTA) - Responses API vía /api/chatgpt
+// ============================================================================
+
+/**
+ * EDUCATIVO: la Responses API no usa `messages` sino una lista de "items":
+ * - mensajes:           { type: 'message', role, content: [{ type: 'input_text' | 'output_text', text }] }
+ * - llamadas a tools:   { type: 'function_call', call_id, name, arguments }
+ * - resultados:         { type: 'function_call_output', call_id, output }
+ * El system prompt va como mensaje de rol 'developer' (igual que hace Codex).
+ */
+const toResponsesInput = (apiMessages: any[]) => {
+    const items: any[] = [];
+    apiMessages.forEach(m => {
+        if (m.role === 'system') {
+            items.push({ type: 'message', role: 'developer', content: [{ type: 'input_text', text: m.content }] });
+        } else if (m.role === 'user') {
+            const parts = typeof m.content === 'string'
+                ? [{ type: 'input_text', text: m.content }]
+                : m.content.map((c: any) =>
+                    c.type === 'image_url' ? { type: 'input_image', image_url: c.image_url.url }
+                        : c.type === 'file' ? { type: 'input_file', filename: c.file.filename, file_data: c.file.file_data }
+                            : { type: 'input_text', text: c.text || '' });
+            items.push({ type: 'message', role: 'user', content: parts });
+        } else if (m.role === 'assistant') {
+            if (m.content) items.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: m.content }] });
+            (m.tool_calls || []).forEach((tc: ToolCall) => items.push({
+                type: 'function_call', call_id: tc.id, name: tc.function.name, arguments: tc.function.arguments || '{}'
+            }));
+        } else if (m.role === 'tool') {
+            items.push({ type: 'function_call_output', call_id: m.tool_call_id, output: m.content || '' });
+        }
+    });
+    return items;
+};
+
+const callChatGPT = async (
+    model: string,
+    apiMessages: any[],
+    tools: any[],
+    settings: AppSettings,
+    options: { signal?: AbortSignal; onSettingsPatch?: (p: Partial<AppSettings>) => void; sessionId?: string }
+): Promise<{ data: any; requestPayload: any; parsed: ParsedResponse }> => {
+    const requestPayload = {
+        model,
+        stream: true,            // el backend de Codex sólo responde en streaming
+        store: false,            // y no guarda las conversaciones
+        input: toResponsesInput(apiMessages),
+        tools: tools.map(t => ({
+            type: 'function',
+            name: t.function.name,
+            description: t.function.description,
+            parameters: t.function.parameters,
+            strict: false
+        })),
+        tool_choice: 'auto',
+        parallel_tool_calls: false,
+        include: [],
+        prompt_cache_key: options.sessionId
+    };
+
+    // Los refresh tokens rotan: tras renovar hay que usar SIEMPRE el nuevo
+    let current = settings;
+    const onRefreshed = (p: Partial<AppSettings>) => { current = { ...current, ...p }; options.onSettingsPatch?.(p); };
+
+    let auth = await ensureFreshChatGPTToken(current, onRefreshed);
+    const send = () => fetch(`${CHATGPT_BRIDGE_PATH}?action=responses`, {
+        method: 'POST',
+        headers: bridgeHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ access_token: auth.accessToken, account_id: auth.accountId, session_id: options.sessionId, body: requestPayload }),
+        signal: options.signal
+    });
+
+    let res = await send();
+    if (res.status === 401) {
+        // Puede ser el token del proxy (NODEMAT_PROXY_TOKEN), no la sesión de ChatGPT
+        const text = await res.clone().text();
+        if (/Token del proxy/i.test(text)) throw new Error('El token del proxy es inválido o falta. Revísalo en Ajustes → MCP → "Token del proxy".');
+        // Token de ChatGPT rechazado: forzar renovación una vez
+        auth = await ensureFreshChatGPTToken(current, onRefreshed, true);
+        res = await send();
+    }
+    if (res.status === 400) {
+        // Versiones anteriores del backend exigían el campo `instructions`: reintentar con él
+        const text = await res.clone().text();
+        if (/instructions/i.test(text) && !('instructions' in requestPayload)) {
+            (requestPayload as any).instructions = apiMessages.find(m => m.role === 'system')?.content || '';
+            res = await send();
+        }
+    }
+    if (!res.ok) {
+        const text = await res.text();
+        let msg = text;
+        try { msg = JSON.parse(text).error || text; } catch { /* texto plano */ }
+        if (res.status === 404 && /<html|NOT_FOUND/i.test(text)) msg = 'No se encontró /api/chatgpt (sólo existe en Vercel o con npm run dev).';
+        if (res.status === 429) msg = `Alcanzaste el límite de uso de tu plan de ChatGPT. ${msg}`;
+        if (res.status === 403) msg = `ChatGPT rechazó la petición (403). Puede que tu plan no incluya este acceso o que OpenAI haya bloqueado el origen. ${msg}`;
+        throw new Error(String(msg).slice(0, 500));
+    }
+    if (!res.body) throw new Error('Respuesta vacía de ChatGPT.');
+
+    const items: any[] = [];
+    let completed: any = null;
+    let failure: string | null = null;
+
+    await readSSE(res.body, (_event, raw) => {
+        let ev: any;
+        try { ev = JSON.parse(raw); } catch { return; }
+        switch (ev.type) {
+            case 'response.output_item.done':
+                if (ev.item) items.push(ev.item);
+                break;
+            case 'response.completed':
+            case 'response.incomplete':
+                completed = ev.response;
+                return true;
+            case 'response.failed':
+                failure = ev.response?.error?.message || 'La respuesta falló.';
+                return true;
+            case 'error':
+                failure = ev.message || ev.error?.message || 'Error en el stream.';
+                return true;
+        }
+    });
+
+    if (failure) throw new Error(`ChatGPT: ${failure}`);
+
+    const output = items.length ? items : (completed?.output || []);
+    const text = output
+        .filter((it: any) => it.type === 'message')
+        .flatMap((it: any) => it.content || [])
+        .filter((c: any) => c.type === 'output_text')
+        .map((c: any) => c.text)
+        .join('');
+    const toolCalls: ToolCall[] = output
+        .filter((it: any) => it.type === 'function_call')
+        .map((it: any) => ({ id: it.call_id, type: 'function' as const, function: { name: it.name, arguments: it.arguments || '{}' } }));
+
+    return {
+        data: { id: completed?.id, usage: completed?.usage, output },
+        requestPayload,
+        parsed: { content: text, images: [], toolCalls: toolCalls.length ? toolCalls : undefined }
     };
 };
 
@@ -435,260 +691,230 @@ const parseGeminiResponse = (data: any): { content: string; toolCalls?: any[] } 
 // MAIN MESSAGE FLOW
 // ============================================================================
 
+export interface ToolApprovalRequest {
+    toolName: string;        // nombre expuesto al LLM
+    originalName: string;    // nombre real en el servidor MCP
+    serverName: string;
+    description?: string;
+    args: any;
+    annotations?: MCPTool['annotations'];
+}
+
+export interface SendMessageOptions {
+    /** Pide confirmación al usuario. Devuelve true si aprueba. */
+    onToolApproval: (req: ToolApprovalRequest) => Promise<boolean>;
+    /** Se llama cada vez que se genera un mensaje nuevo (para mostrar progreso). */
+    onUpdate?: (messages: Message[]) => void;
+    signal?: AbortSignal;
+    /** Para persistir cambios de ajustes hechos durante el envío (p. ej. token de ChatGPT renovado). */
+    onSettingsPatch?: (patch: Partial<AppSettings>) => void;
+    /** Identificador estable de la conversación (cache de prompts en ChatGPT). */
+    sessionId?: string;
+}
+
 /**
  * Función principal para enviar un mensaje y obtener respuesta del LLM.
- * 
+ *
  * EDUCATIVO: Esta función implementa el "Agentic Loop":
- * 1. Enviar mensaje del usuario
+ * 1. Enviar el historial (el último mensaje es el del usuario)
  * 2. Si el modelo solicita ejecutar herramientas -> pedir aprobación
- * 3. Ejecutar herramientas aprobadas
+ * 3. Ejecutar herramientas aprobadas en el servidor MCP
  * 4. Enviar resultados al modelo
  * 5. Repetir hasta que el modelo dé una respuesta final
- * 
+ *
  * @param settings - Configuración completa de la app
- * @param history - Historial de mensajes previos
- * @param currentMessage - Mensaje actual del usuario
- * @param attachments - Archivos adjuntos (imágenes, texto)
- * @param onToolApproval - Callback para aprobar/rechazar ejecución de herramientas
- * @returns Array de nuevos mensajes generados (puede incluir múltiples si hubo tool calling)
+ * @param history - Historial completo, INCLUYENDO el mensaje nuevo del usuario
+ * @returns Mensajes nuevos generados (llamadas a tools, resultados y respuesta final)
  */
 export const sendMessage = async (
     settings: AppSettings,
     history: Message[],
-    currentMessage: string,
-    attachments: Attachment[],
-    onToolApproval: (toolName: string, args: any) => Promise<boolean>
+    options: SendMessageOptions
 ): Promise<Message[]> => {
-
+    const { onToolApproval, onUpdate, signal } = options;
     const { activeProvider } = settings;
 
     // Mapeo de keys y modelos por proveedor
     const providerKeyMap: Record<Provider, { key: string; model: string }> = {
-        groq: { key: settings.groqKey, model: settings.groqModel || 'llama3-8b-8192' },
-        openrouter: { key: settings.openRouterKey, model: settings.openRouterModel || 'openai/gpt-3.5-turbo' },
+        groq: { key: settings.groqKey, model: settings.groqModel || 'llama-3.1-8b-instant' },
+        openrouter: { key: settings.openRouterKey, model: settings.openRouterModel || 'openai/gpt-4o-mini' },
         openai: { key: settings.openaiKey, model: settings.openaiModel || 'gpt-4o-mini' },
         cerebras: { key: settings.cerebrasKey, model: settings.cerebrasModel || 'llama3.1-8b' },
-        gemini: { key: settings.geminiKey, model: settings.geminiModel || 'gemini-1.5-flash' },
-        xai: { key: settings.xaiKey, model: settings.xaiModel || 'grok-beta' },
+        gemini: { key: settings.geminiKey, model: settings.geminiModel || 'gemini-2.5-flash' },
+        xai: { key: settings.xaiKey, model: settings.xaiModel || 'grok-3-mini' },
         custom1: { key: settings.custom1Key, model: settings.custom1Model },
-        custom2: { key: settings.custom2Key, model: settings.custom2Model }
+        custom2: { key: settings.custom2Key, model: settings.custom2Model },
+        chatgpt: { key: settings.chatgptKey, model: settings.chatgptModel || 'gpt-5' }
     };
 
     const { key, model } = providerKeyMap[activeProvider];
 
     if (!key) throw new Error(`La API Key para ${activeProvider} no está configurada.`);
 
-    // 1. Construir System Prompt con instrucciones sobre herramientas
+    // 1. System prompt + herramientas MCP activas
     let systemInstruction = settings.systemPrompt || "Eres Nodemat AI. Responde en el idioma del usuario. Si usas herramientas, usa la información que te devuelven para construir tu respuesta final.";
 
-    // Mapear herramientas MCP activas a definiciones para el LLM
-    const toolMap: Record<string, MCPServer> = {};
-    const activeToolsDefs: any[] = [];
-
-    settings.mcpServers.forEach(server => {
-        if (server.status === 'connected') {
-            const enabled = server.tools.filter(t => server.enabledTools.includes(t.name));
-            enabled.forEach(t => {
-                toolMap[t.name] = server;
-                activeToolsDefs.push({
-                    type: "function",
-                    function: {
-                        name: t.name,
-                        description: t.description,
-                        parameters: t.inputSchema
-                    }
-                });
-            });
-        }
-    });
+    const { bindings, defs: activeToolsDefs } = buildToolRegistry(settings.mcpServers);
 
     if (activeToolsDefs.length > 0) {
-        systemInstruction += "\n\nTienes acceso a herramientas locales. Úsalas cuando sea necesario.";
+        systemInstruction += "\n\nTienes acceso a herramientas externas (MCP). Úsalas cuando sea necesario.";
+        // La spec MCP permite que el servidor envíe "instructions" para el modelo
+        const withInstructions = new Set(Object.values(bindings).map(b => b.server));
+        withInstructions.forEach(s => {
+            if (s.instructions) systemInstruction += `\n\n[Instrucciones del servidor ${s.serverInfo?.name || s.url}]\n${s.instructions}`;
+        });
     }
 
-    // 2. Preparar historial de mensajes en formato API
+    // 2. Historial en formato API (el mensaje actual ya está incluido al final)
     const apiMessages: any[] = [
-        { role: 'system', content: systemInstruction }
+        { role: 'system', content: systemInstruction },
+        ...toApiMessages(history, activeProvider)
     ];
 
-    history.forEach(m => {
-        if (m.role === 'tool') {
-            apiMessages.push({
-                role: 'tool',
-                tool_call_id: m.tool_call_id,
-                name: m.name,
-                content: m.content
-            });
-        } else if (m.role === 'model') {
-            const msg: any = { role: 'assistant', content: m.content };
-            if (m.toolCalls) msg.tool_calls = m.toolCalls;
-            apiMessages.push(msg);
-        } else if (m.role === 'user') {
-            if (m.attachments && m.attachments.length > 0) {
-                const contentArray: any[] = [{ type: "text", text: m.content || "" }];
-                m.attachments.forEach(att => {
-                    const isNative = att.type.startsWith('image/');
+    // Copia viva de los ajustes: si se renueva el token de ChatGPT, los turnos siguientes usan el nuevo
+    let liveSettings = settings;
+    const patchSettings = (p: Partial<AppSettings>) => { liveSettings = { ...liveSettings, ...p }; options.onSettingsPatch?.(p); };
 
-                    if (isNative) {
-                        contentArray.push({ type: "image_url", image_url: { url: att.data } });
-                    } else {
-                        // Archivos de texto se adjuntan inline
-                        contentArray[0].text += `\n\n--- Archivo Adjunto: ${att.name} ---\n${att.data}\n-------------------`;
-                    }
-                });
-                apiMessages.push({ role: 'user', content: contentArray });
-            } else {
-                apiMessages.push({ role: 'user', content: m.content });
-            }
-        }
-    });
+    // 3. Loop agéntico
+    const generated: Message[] = [];
+    const emit = (m: Message) => { generated.push(m); onUpdate?.([...generated]); };
 
-    // 3. Preparar mensaje actual del usuario
-    let contentPayload: any = currentMessage;
-    if (attachments.length > 0) {
-        const contentArray: any[] = [{ type: "text", text: currentMessage }];
-        attachments.forEach(att => {
-            const isNative = att.type.startsWith('image/');
-
-            if (isNative) {
-                contentArray.push({ type: "image_url", image_url: { url: att.data } });
-            } else {
-                contentArray[0].text += `\n\n--- Archivo Adjunto: ${att.name} ---\n${att.data}\n-------------------`;
-            }
-        });
-        contentPayload = contentArray;
-    }
-
-    apiMessages.push({ role: 'user', content: contentPayload });
-
-    // 4. Loop de ejecución (máximo 5 turnos de tool calling)
-    const newMessagesGenerated: Message[] = [];
-    let keepGoing = true;
-    let turns = 0;
-
-    while (keepGoing && turns < 5) {
-        turns++;
-
-        const { data, requestPayload } = await callLLMProvider(activeProvider, key, model, apiMessages, activeToolsDefs, settings);
-
-        // Parsear respuesta según proveedor
-        let messageContent = '';
-        let toolCalls: any[] | undefined;
-
-        if (activeProvider === 'gemini') {
-            const parsed = parseGeminiResponse(data);
-            messageContent = parsed.content;
-            toolCalls = parsed.toolCalls;
+    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+        let data: any, requestPayload: any, parsed: ParsedResponse;
+        if (activeProvider === 'chatgpt') {
+            ({ data, requestPayload, parsed } = await callChatGPT(model, apiMessages, activeToolsDefs, liveSettings, {
+                signal, onSettingsPatch: patchSettings, sessionId: options.sessionId
+            }));
         } else {
-            // Formato OpenAI-compatible
-            const choice = data.choices[0];
-            const messageData = choice.message;
-            messageContent = messageData.content || '';
-            toolCalls = messageData.tool_calls;
+            ({ data, requestPayload } = await callLLMProvider(activeProvider, key, model, apiMessages, activeToolsDefs, settings, signal));
+            parsed = activeProvider === 'gemini' ? parseGeminiResponse(data) : parseOpenAIResponse(data);
         }
 
-        if (toolCalls && toolCalls.length > 0) {
-            // El modelo quiere ejecutar herramientas
-            apiMessages.push({ role: 'assistant', content: messageContent, tool_calls: toolCalls });
+        const usage = data.usage ? {
+            input: data.usage.prompt_tokens || data.usage.input_tokens || 0,
+            output: data.usage.completion_tokens || data.usage.output_tokens || 0,
+            total: data.usage.total_tokens || 0
+        } : data.usageMetadata ? {
+            input: data.usageMetadata.promptTokenCount || 0,
+            output: data.usageMetadata.candidatesTokenCount || 0,
+            total: data.usageMetadata.totalTokenCount || 0
+        } : undefined;
 
-            for (const toolCall of toolCalls) {
-                const fnName = toolCall.function.name;
-                const fnArgsStr = toolCall.function.arguments;
+        const rawDebug = {
+            requestId: data.id || data.responseId || `req-${Date.now()}`,
+            provider: activeProvider,
+            model,
+            requestPayload,
+            responsePayload: data
+        };
 
-                let executionResult = "";
-                let args = {};
+        if (!parsed.toolCalls || parsed.toolCalls.length === 0) {
+            // Respuesta final
+            emit({
+                id: uid(),
+                role: 'model',
+                content: parsed.content,
+                attachments: parsed.images.length ? parsed.images : undefined,
+                timestamp: Date.now(),
+                usage,
+                rawDebug
+            });
+            return generated;
+        }
 
-                try {
-                    args = JSON.parse(fnArgsStr);
-                } catch {
-                    args = { error: "Invalid JSON args" };
-                }
+        // El modelo quiere ejecutar herramientas
+        apiMessages.push({ role: 'assistant', content: parsed.content, tool_calls: parsed.toolCalls });
+        emit({
+            id: uid(),
+            role: 'model',
+            content: parsed.content,
+            toolCalls: parsed.toolCalls,
+            timestamp: Date.now(),
+            usage,
+            rawDebug
+        });
 
-                if (toolMap[fnName]) {
-                    // Pedir aprobación al usuario antes de ejecutar
-                    const isApproved = await onToolApproval(fnName, args);
+        for (const toolCall of parsed.toolCalls) {
+            const fnName = toolCall.function.name;
+            const binding = bindings[fnName];
 
-                    if (isApproved) {
-                        try {
-                            executionResult = await executeMCPToolCall(toolMap[fnName], fnName, args);
-                        } catch (err: any) {
-                            executionResult = `Error executing tool: ${err.message}`;
-                        }
-                    } else {
-                        executionResult = "User denied execution of this tool.";
+            let args: any = {};
+            let argsError = false;
+            try {
+                args = toolCall.function.arguments ? JSON.parse(toolCall.function.arguments) : {};
+            } catch {
+                argsError = true;
+            }
+
+            let resultText: string;
+            let images: Attachment[] = [];
+            let isError = false;
+            let denied = false;
+            const started = performance.now();
+
+            if (!binding) {
+                resultText = `Error: la herramienta "${fnName}" no existe o su servidor está desconectado.`;
+                isError = true;
+            } else if (argsError) {
+                resultText = `Error: los argumentos no son JSON válido: ${toolCall.function.arguments}`;
+                isError = true;
+            } else {
+                const serverName = binding.server.name || binding.server.serverInfo?.name || binding.server.url;
+                const approved = binding.server.autoApprove || await onToolApproval({
+                    toolName: fnName,
+                    originalName: binding.originalName,
+                    serverName,
+                    description: binding.tool.description,
+                    args,
+                    annotations: binding.tool.annotations
+                });
+
+                if (signal?.aborted) throw new DOMException('Cancelado por el usuario', 'AbortError');
+
+                if (approved) {
+                    try {
+                        const r = await callServerTool(binding.server, binding.originalName, args, signal);
+                        resultText = r.text || '(sin contenido)';
+                        images = r.images;
+                        isError = r.isError;
+                    } catch (err: any) {
+                        if (err?.name === 'AbortError') throw err;
+                        resultText = `Error ejecutando la herramienta: ${err.message}`;
+                        isError = true;
                     }
                 } else {
-                    executionResult = "Error: Tool not found or server disconnected.";
-                }
-
-                const toolMsg = {
-                    role: 'tool',
-                    tool_call_id: toolCall.id,
-                    name: fnName,
-                    content: executionResult
-                };
-                apiMessages.push(toolMsg);
-            }
-
-        } else {
-            // El modelo dio una respuesta final
-            keepGoing = false;
-
-            // Extraer imágenes de la respuesta si las hay
-            let finalContent = messageContent;
-
-            if (activeProvider === 'openrouter' || activeProvider === 'openai') {
-                const choice = data.choices?.[0];
-                const choiceImages = choice?.images;
-
-                if (choiceImages && Array.isArray(choiceImages) && choiceImages.length > 0) {
-                    const imageParts: string[] = [];
-                    choiceImages.forEach((img: any) => {
-                        if (img.image_url?.url) {
-                            imageParts.push(`![Imagen Generada](${img.image_url.url})`);
-                        }
-                    });
-                    if (imageParts.length > 0) {
-                        finalContent = finalContent
-                            ? finalContent + '\n\n' + imageParts.join('\n\n')
-                            : imageParts.join('\n\n');
-                    }
+                    resultText = "El usuario rechazó la ejecución de esta herramienta.";
+                    denied = true;
                 }
             }
 
-            const finalMsg: Message = {
-                id: Date.now().toString(),
-                role: 'model',
-                content: finalContent,
+            apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, name: fnName, content: resultText });
+            emit({
+                id: uid(),
+                role: 'tool',
+                content: resultText,
+                tool_call_id: toolCall.id,
+                name: fnName,
+                attachments: images.length ? images : undefined,
                 timestamp: Date.now(),
-                usage: data.usage ? {
-                    input: data.usage.prompt_tokens || data.usage.input_tokens || 0,
-                    output: data.usage.completion_tokens || data.usage.output_tokens || 0,
-                    total: data.usage.total_tokens || 0
-                } : undefined,
-                rawDebug: {
-                    requestId: data.id || `req-${Date.now()}`,
-                    provider: activeProvider,
-                    model: model,
-                    requestPayload: requestPayload,
-                    responsePayload: data
+                toolMeta: {
+                    serverName: binding ? (binding.server.name || binding.server.serverInfo?.name || binding.server.url) : '—',
+                    originalName: binding?.originalName || fnName,
+                    args,
+                    isError,
+                    denied,
+                    durationMs: Math.round(performance.now() - started)
                 }
-            };
-            newMessagesGenerated.push(finalMsg);
+            });
         }
     }
 
     // Límite de seguridad alcanzado
-    if (turns >= 5) {
-        newMessagesGenerated.push({
-            id: Date.now().toString(),
-            role: 'model',
-            content: "⚠️ Límite de ejecución de herramientas alcanzado.",
-            timestamp: Date.now()
-        });
-    }
-
-    return newMessagesGenerated;
+    emit({
+        id: uid(),
+        role: 'system',
+        content: `⚠️ Se alcanzó el límite de ${MAX_TOOL_TURNS} rondas de herramientas sin una respuesta final.`,
+        timestamp: Date.now()
+    });
+    return generated;
 };
-
-export { getFriendlyMCPError };
