@@ -50,11 +50,15 @@ La app incluye un **proxy same-origin** (`/api/mcp`, función serverless de Verc
 1. En n8n, agrega un nodo **MCP Server Trigger**, activa el workflow y copia la *Production URL*.
 2. En Nodemat → Ajustes → Servidores MCP: pega la URL, deja **"Conectar vía proxy"** activado y conecta.
 3. Si n8n pide autenticación (Bearer o header), cárgala en "Autenticación"; el proxy la reenvía.
-4. En Vercel, define `MCP_PROXY_ALLOWED_HOSTS` (default `*.n8n.cloud`) y, recomendado, `NODEMAT_PROXY_TOKEN` (y cárgalo en Ajustes).
+
+**No hace falta configurar nada en Vercel.** El proxy no guarda nada y aplica reglas fijas: sólo servidores `https` públicos (bloquea IPs privadas, `localhost` y nombres que resuelven a la red interna). Opcionalmente, quien despliega puede endurecerlo con `MCP_PROXY_ALLOWED_HOSTS` y `NODEMAT_PROXY_TOKEN` (ver `.env.example`). En local (`npm run dev`) el proxy también acepta servidores de tu red.
+
+#### 🔒 Todo queda en tu navegador
+API keys, sesión de ChatGPT, servidores MCP, ajustes y conversaciones se guardan sólo en el navegador (localStorage + IndexedDB). En **Gestión de Datos → Configuración** puedes exportar todo a un archivo `.json` (cifrado con contraseña, AES-GCM) e importarlo en otra PC.
 
 > Límites: cada llamada pasa por una función de Vercel con `maxDuration` de 60 s (configurable en `vercel.json` según tu plan). Con proxy, prefiere **Streamable HTTP**: el transporte SSE legacy mantiene un stream abierto que Vercel corta a los 60 s (Nodemat reconecta, pero una herramienta en curso puede fallar).
 >
-> Seguridad: el proxy sólo bloquea a *otros sitios web* desde el navegador. Sin `NODEMAT_PROXY_TOKEN`, cualquiera que conozca tu URL de Vercel podría usar `/api/mcp` (sólo hacia los hosts permitidos) y `/api/chatgpt` con sus propias credenciales. Define el token si la app es pública.
+> Seguridad: el proxy bloquea a *otros sitios web* desde el navegador, pero sin `NODEMAT_PROXY_TOKEN` cualquiera que conozca tu URL de Vercel podría usar `/api/mcp` (hacia servidores https públicos) y `/api/chatgpt` con sus propias credenciales, consumiendo tu cuota de Vercel. Es el precio de no tener configuración en el servidor.
 
 > Sin proxy, los servidores MCP deben permitir CORS (origen, headers `Mcp-Session-Id` y `MCP-Protocol-Version`, y exponer `Mcp-Session-Id`). Para servidores `stdio`, usa un puente como `npx supergateway --stdio "<comando>" --outputTransport streamableHttp --cors`.
 

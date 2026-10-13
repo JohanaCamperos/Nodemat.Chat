@@ -10,25 +10,66 @@
  * hay CORS que resolver. El proxy reenvía la petición al servidor MCP real y
  * devuelve la respuesta en streaming (soporta SSE).
  *
- * SEGURIDAD — un proxy abierto es peligroso (SSRF, relay anónimo). Por eso:
- *   - Solo reenvía a hosts de la lista MCP_PROXY_ALLOWED_HOSTS (default: *.n8n.cloud)
- *   - Solo HTTPS (salvo MCP_PROXY_ALLOW_HTTP=1, pensado para desarrollo local)
+ * CERO CONFIGURACIÓN EN EL SERVIDOR: toda la configuración (qué servidores MCP,
+ * credenciales, etc.) vive en el navegador del usuario. El proxy no guarda nada.
+ *
+ * SEGURIDAD — reglas fijas, no configurables desde el cliente:
+ *   - Solo destinos HTTPS públicos: se rechazan IPs privadas, localhost, link-local
+ *     (metadata de nubes) y nombres que RESUELVEN a esas IPs (anti-SSRF)
  *   - Rechaza peticiones que vengan de OTRO sitio web (Origin / Sec-Fetch-Site)
- *   - Si se define NODEMAT_PROXY_TOKEN, exige el header x-nodemat-proxy-token
- *   - No sigue redirecciones (evita saltarse la lista de hosts)
+ *   - No sigue redirecciones
  *   - No reenvía cookies ni headers internos de la plataforma
+ *
+ * Refuerzos OPCIONALES por variable de entorno (no hacen falta):
+ *   - MCP_PROXY_ALLOWED_HOSTS: restringe a una lista de hosts (ej. *.n8n.cloud)
+ *   - NODEMAT_PROXY_TOKEN: exige el header x-nodemat-proxy-token
+ *   - MCP_PROXY_ALLOW_HTTP / MCP_PROXY_ALLOW_PRIVATE: sólo para desarrollo local
  *
  * USO desde el cliente:
  *   fetch('/api/mcp', { method, headers: { 'x-mcp-target': 'https://...', ...}, body })
  */
 
+import { lookup } from 'node:dns/promises';
+
 export interface ProxyEnv {
     MCP_PROXY_ALLOWED_HOSTS?: string;
     MCP_PROXY_ALLOW_HTTP?: string;
+    MCP_PROXY_ALLOW_PRIVATE?: string;
     NODEMAT_PROXY_TOKEN?: string;
 }
 
-const DEFAULT_ALLOWED_HOSTS = '*.n8n.cloud';
+const isTrue = (v?: string) => v === '1' || v === 'true';
+
+/** ¿La IP pertenece a una red privada, loopback, link-local o reservada? */
+export function isPrivateAddress(ip: string): boolean {
+    const addr = ip.toLowerCase().replace(/^\[|\]$/g, '');
+    const v4 = addr.startsWith('::ffff:') ? addr.slice(7) : addr;
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(v4)) {
+        const [a, b] = v4.split('.').map(Number);
+        return a === 0 || a === 10 || a === 127 || a >= 224 ||
+            (a === 100 && b >= 64 && b <= 127) ||   // CGNAT
+            (a === 169 && b === 254) ||             // link-local / metadata de nubes
+            (a === 172 && b >= 16 && b <= 31) ||
+            (a === 192 && b === 168) ||
+            (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19));
+    }
+    return addr === '::' || addr === '::1' || addr.startsWith('fc') || addr.startsWith('fd') ||
+        addr.startsWith('fe8') || addr.startsWith('fe9') || addr.startsWith('fea') || addr.startsWith('feb');
+}
+
+/** Resuelve el host y verifica que TODAS sus IPs sean públicas. */
+async function resolvesToPublic(hostname: string): Promise<{ ok: boolean; reason?: string }> {
+    const host = hostname.replace(/^\[|\]$/g, '');
+    if (/^localhost$|\.localhost$|\.local$|\.internal$/i.test(host)) return { ok: false, reason: 'es un nombre de red local' };
+    try {
+        const addrs = await lookup(host, { all: true });
+        const bad = addrs.find(a => isPrivateAddress(a.address));
+        if (bad) return { ok: false, reason: `resuelve a una IP privada (${bad.address})` };
+        return { ok: true };
+    } catch {
+        return { ok: false, reason: 'no se pudo resolver el nombre (DNS)' };
+    }
+}
 
 /** Headers del cliente que NO se reenvían al servidor MCP */
 const BLOCKED_REQUEST_HEADERS = new Set([
@@ -83,24 +124,25 @@ export async function handleMcpProxy(request: Request, env: ProxyEnv): Promise<R
     let target: URL;
     try { target = new URL(targetRaw); } catch { return json(400, { error: 'x-mcp-target no es una URL válida' }); }
 
-    const allowHttp = env.MCP_PROXY_ALLOW_HTTP === '1' || env.MCP_PROXY_ALLOW_HTTP === 'true';
-    if (target.protocol !== 'https:' && !(allowHttp && target.protocol === 'http:')) {
+    if (target.protocol !== 'https:' && !(isTrue(env.MCP_PROXY_ALLOW_HTTP) && target.protocol === 'http:')) {
         return json(400, { error: 'Proxy MCP: sólo se permiten destinos https://' });
     }
-    if (target.username || target.password) return json(400, { error: 'URL con credenciales embebidas no permitida' });
+    if (target.username || target.password) return json(400, { error: 'Proxy MCP: URL con credenciales embebidas no permitida' });
 
-    const allowList = env.MCP_PROXY_ALLOWED_HOSTS || DEFAULT_ALLOWED_HOSTS;
-    // IPs y localhost sólo si están listados explícitamente (un comodín no alcanza): evita SSRF a la red interna
-    const isLiteralHost = /^[\d.]+$|^\[|^localhost$/i.test(target.hostname);
-    const explicitlyListed = allowList.split(',').map(s => s.trim().toLowerCase()).includes(target.hostname.toLowerCase());
-    if (isLiteralHost && !explicitlyListed) {
-        return json(403, { error: `Proxy MCP: las direcciones IP y localhost deben figurar explícitamente en MCP_PROXY_ALLOWED_HOSTS.` });
+    // Refuerzo opcional: lista de hosts definida en el servidor
+    if (env.MCP_PROXY_ALLOWED_HOSTS && !isHostAllowed(target.hostname, env.MCP_PROXY_ALLOWED_HOSTS)) {
+        return json(403, { error: `Proxy MCP: el host "${target.hostname}" no está en MCP_PROXY_ALLOWED_HOSTS de este despliegue.` });
     }
-    if (!isHostAllowed(target.hostname, allowList)) {
-        return json(403, {
-            error: `Proxy MCP: el host "${target.hostname}" no está permitido. ` +
-                `Agrégalo a la variable de entorno MCP_PROXY_ALLOWED_HOSTS (actual: ${allowList}).`
-        });
+
+    // Regla fija: sólo servidores públicos (anti-SSRF). En desarrollo local se puede relajar.
+    if (!isTrue(env.MCP_PROXY_ALLOW_PRIVATE)) {
+        const check = await resolvesToPublic(target.hostname);
+        if (!check.ok) {
+            return json(403, {
+                error: `Proxy MCP: "${target.hostname}" ${check.reason}. El proxy sólo conecta con servidores públicos; ` +
+                    `para servidores en tu red, conéctate sin proxy o corre Nodemat en local (npm run dev).`
+            });
+        }
     }
 
     const headers = new Headers();

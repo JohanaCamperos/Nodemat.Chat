@@ -315,10 +315,18 @@ export async function importSessionsFromFile(file: File): Promise<ChatSession[]>
     let parsed: any;
     try { parsed = JSON.parse(text); } catch { throw new Error('El archivo no es JSON válido.'); }
 
+    if (parsed?.format === 'nodemat-config') {
+        throw new Error('Ese archivo es una configuración completa: impórtalo con "Importar configuración".');
+    }
     const list: any[] = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.sessions) ? parsed.sessions : [parsed];
-    const valid = list.filter(s => s && Array.isArray(s.messages));
-    if (valid.length === 0) throw new Error('No se encontraron conversaciones en el archivo.');
+    const sessions = normalizeImportedSessions(list);
+    if (sessions.length === 0) throw new Error('No se encontraron conversaciones en el archivo.');
+    return sessions;
+}
 
+/** Valida sesiones importadas y les asigna IDs nuevos para no pisar las existentes. */
+export function normalizeImportedSessions(list: any[]): ChatSession[] {
+    const valid = list.filter(s => s && Array.isArray(s.messages));
     return valid.map((s, i) => ({
         id: `${Date.now()}-${i}`,
         title: typeof s.title === 'string' ? s.title : 'Chat importado',

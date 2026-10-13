@@ -11,7 +11,8 @@ import { handleChatGPT } from './server/chatgpt';
  */
 function apiRoutes(env: Record<string, string>): Plugin {
     const routes: Record<string, (req: Request) => Promise<Response>> = {
-        '/api/mcp': (req) => handleMcpProxy(req, { MCP_PROXY_ALLOW_HTTP: '1', ...env }),
+        // En local se permiten servidores http:// y de tu red (ej. un n8n en localhost)
+        '/api/mcp': (req) => handleMcpProxy(req, { MCP_PROXY_ALLOW_HTTP: '1', MCP_PROXY_ALLOW_PRIVATE: '1', ...env }),
         '/api/chatgpt': (req) => handleChatGPT(req, env)
     };
 

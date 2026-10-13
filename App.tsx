@@ -9,6 +9,7 @@ import { sendMessage, fetchModels, ToolApprovalRequest } from './services/llmSer
 import { connectServer, disconnectServer, getFriendlyMCPError } from './services/mcpClient';
 import { setBridgeToken } from './services/bridge';
 import { ChatGPTAccountCard } from './components/ChatGPTAccountCard';
+import { ConfigBackupSection } from './components/ConfigBackupSection';
 import {
     fileToAttachment, downloadImage, downloadAttachment, formatBytes, ACCEPT_ATTRIBUTE,
     exportSessionJSON, exportSessionMarkdown, shareSession, shareText, copyText, shareOutcomeLabel,
@@ -296,7 +297,7 @@ const ToolApprovalModal = ({ pendingTool, onConfirm }: { pendingTool: (ToolAppro
     );
 };
 
-const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onImport, onDeleteAll, storageUsage }) => {
+const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onImport, onDeleteAll, storageUsage, settings, sessions, onImportConfig }) => {
     const [filename, setFilename] = useState(`nexus_backup_${new Date().toISOString().slice(0, 10)}`);
 
     if (!isOpen) return null;
@@ -306,7 +307,7 @@ const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onImport, onDel
 
     return (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-surface rounded-2xl w-full max-w-md shadow-2xl p-6 border border-border text-text-main">
+            <div className="bg-surface rounded-2xl w-full max-w-md shadow-2xl p-6 border border-border text-text-main max-h-[90vh] overflow-y-auto">
                 <div className="flex justify-between items-center mb-4">
                     <h3 className="text-lg font-bold flex items-center gap-2">
                         <Settings size={20} className="text-text-muted" /> Gestión de Datos
@@ -324,6 +325,8 @@ const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onImport, onDel
                         Almacenamiento masivo habilitado. El límite depende de tu disco duro.
                     </p>
                 </div>
+
+                <ConfigBackupSection settings={settings} sessions={sessions} onImported={onImportConfig} />
 
 
                 <div className="mb-6">
@@ -1061,8 +1064,8 @@ const SettingsModal: React.FC<any> = ({
                                             }}
                                         />
                                         <span>
-                                            <strong className="text-text-main">Conectar vía proxy</strong> — evita el bloqueo CORS pasando por <code>/api/mcp</code> de esta app.
-                                            Necesario para n8n Cloud. El host debe estar en <code>MCP_PROXY_ALLOWED_HOSTS</code> (por defecto <code>*.n8n.cloud</code>).
+                                            <strong className="text-text-main">Conectar vía proxy</strong> — evita el bloqueo CORS pasando por <code>/api/mcp</code> de esta app
+                                            (necesario para n8n Cloud). El proxy no guarda nada y sólo conecta con servidores https públicos.
                                         </span>
                                     </label>
 
@@ -1170,7 +1173,7 @@ const SettingsModal: React.FC<any> = ({
                                     type="password"
                                     value={settings.proxyToken || ''}
                                     onChange={(e: any) => { const val = e.target.value; setSettings((s: AppSettings) => ({ ...s, proxyToken: val })); }}
-                                    placeholder="Sólo si definiste NODEMAT_PROXY_TOKEN en Vercel"
+                                    placeholder="Opcional: sólo si el administrador definió NODEMAT_PROXY_TOKEN en el servidor"
                                     className="flex-1 p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none font-mono"
                                 />
                             </div>
@@ -2061,6 +2064,19 @@ export default function App() {
         }
     };
 
+    const handleImportConfig = async (imported: Partial<AppSettings>, importedSessions: ChatSession[]) => {
+        // Las conexiones MCP vivas no se pueden restaurar: se reconectan desde Ajustes
+        settings.mcpServers.forEach(s => disconnectServer(s.id));
+        setSettings(prev => ({ ...prev, ...imported }));
+        if (importedSessions.length > 0) {
+            setSessions(prev => [...importedSessions, ...prev]);
+            setCurrentSessionId(importedSessions[0].id);
+            if (!settings.incognitoMode) {
+                for (const s of importedSessions) await storageService.saveSession(s);
+            }
+        }
+    };
+
     const handleShareMessage = async (msg: Message) => {
         const outcome = await shareText(msg.content || '', currentSession.title);
         if (outcome !== 'shared' && outcome !== 'cancelled') flash(shareOutcomeLabel[outcome]);
@@ -2137,6 +2153,9 @@ export default function App() {
                 onImport={handleImportChats}
                 onDeleteAll={handleDeleteAll}
                 storageUsage={storageUsage}
+                settings={settings}
+                sessions={sessions}
+                onImportConfig={handleImportConfig}
             />
 
             <ImageGenModal
