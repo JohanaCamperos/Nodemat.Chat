@@ -1,5 +1,5 @@
 import React from 'react';
-import { Copy, Share2 } from 'lucide-react';
+import { Copy, Pencil, RefreshCw, Share2 } from 'lucide-react';
 import { AttachmentIcon } from './AttachmentIcon';
 import { Message } from '../types';
 import { ChatImage } from './ChatImage';
@@ -11,16 +11,23 @@ interface Props {
     msg: Message;
     onCopy: (msg: Message) => void;
     onShare: (msg: Message) => void;
+    /** Mensajes del usuario: editar y reenviar desde ahí */
+    onEdit?: (msg: Message) => void;
+    /** Última respuesta: pedirla de nuevo */
+    onRegenerate?: () => void;
 }
 
 /** Una burbuja del chat: mensaje del usuario, respuesta del modelo, error o resultado de herramienta. */
-export const ChatMessage: React.FC<Props> = ({ msg, onCopy, onShare }) => {
+export const ChatMessage: React.FC<Props> = ({ msg, onCopy, onShare, onEdit, onRegenerate }) => {
     // Resultados de herramientas MCP: tarjeta compacta
     if (msg.role === 'tool') {
         return (
             <div className="flex justify-start">
-                <div className="max-w-[90%] md:max-w-[80%] w-full md:w-auto md:min-w-[320px]">
+                <div className="max-w-[90%] md:max-w-[80%] w-full md:w-auto md:min-w-[320px] space-y-1">
                     <ToolResultCard message={msg} onDownload={downloadImage} />
+                    {onRegenerate && (
+                        <button onClick={onRegenerate} className="text-xs text-text-muted hover:text-text-main flex items-center gap-1"><RefreshCw size={12} /> Reintentar</button>
+                    )}
                 </div>
             </div>
         );
@@ -100,8 +107,22 @@ export const ChatMessage: React.FC<Props> = ({ msg, onCopy, onShare }) => {
                                 ⬇ {msg.usage.input} | ⬆ {msg.usage.output}
                             </span>
                         )}
+                        {(onEdit || onRegenerate) && (
+                            <span className="flex items-center gap-1 opacity-100 md:opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
+                                {onEdit && (
+                                    <button onClick={() => onEdit(msg)} className="p-1 hover:text-text-main rounded" title="Editar y reenviar" aria-label="Editar mensaje">
+                                        <Pencil size={12} />
+                                    </button>
+                                )}
+                                {onRegenerate && (
+                                    <button onClick={onRegenerate} className="p-1 hover:text-text-main rounded" title="Generar de nuevo" aria-label="Generar de nuevo">
+                                        <RefreshCw size={12} />
+                                    </button>
+                                )}
+                            </span>
+                        )}
                         {msg.content && msg.role !== 'system' && (
-                            <span className="flex items-center gap-1 opacity-0 group-hover/msg:opacity-100 transition-opacity">
+                            <span className="flex items-center gap-1 opacity-100 md:opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 transition-opacity">
                                 <button onClick={() => onCopy(msg)} className="p-1 hover:text-text-main rounded" title="Copiar">
                                     <Copy size={12} />
                                 </button>

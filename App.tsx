@@ -176,6 +176,25 @@ export default function App() {
     const [streamText, setStreamText] = useState<string | null>(null);
     const [processingFiles, setProcessingFiles] = useState(0);
     const [isGalleryOpen, setIsGalleryOpen] = useState(false);
+    // Escape cierra la ventana de arriba (las de aprobación y las del servidor MCP se responden con un botón)
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || e.defaultPrevented) return;
+            const closers: [boolean, () => void][] = [
+                [isImageModalOpen, () => { setIsImageModalOpen(false); setImageEditSource(null); }],
+                [isGalleryOpen, () => setIsGalleryOpen(false)],
+                [isMCPLibraryOpen, () => setIsMCPLibraryOpen(false)],
+                [showFileUploadModal, () => setShowFileUploadModal(false)],
+                [isSystemPromptOpen, () => setIsSystemPromptOpen(false)],
+                [isManageModalOpen, () => setIsManageModalOpen(false)],
+                [isSettingsOpen, () => setIsSettingsOpen(false)],
+                [isSidebarOpen, () => setIsSidebarOpen(false)]
+            ];
+            closers.find(([open]) => open)?.[1]();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    });
     /** Imagen con la que se abre el generador desde "Editar" */
     const [imageEditSource, setImageEditSource] = useState<string | null>(null);
     useEffect(() => onImageEditRequest((src) => { setImageEditSource(src); setIsImageModalOpen(true); }), []);
@@ -704,25 +723,42 @@ export default function App() {
         }
     };
 
-    const handleSend = async () => {
-        if ((!input.trim() && attachments.length === 0) || isLoading || processingFiles > 0) return;
-
+    /** ¿Hay un proveedor conectado? Si no, abre Ajustes. */
+    const ensureConnected = () => {
         const connectedMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected', anthropic: 'anthropicConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
             custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
-        const isConnected = settings[connectedMap[settings.activeProvider]];
-        if (!isConnected) {
-            alert(`Por favor, conecta ${settings.activeProvider.toUpperCase()} en los Ajustes primero.`);
-            setIsSettingsOpen(true);
-            return;
-        }
+        if (settings[connectedMap[settings.activeProvider]]) return true;
+        flash(`Conecta ${PROVIDER_NAMES[settings.activeProvider]} en Ajustes primero.`);
+        setIsSettingsOpen(true);
+        return false;
+    };
 
-        // ============================================
-        // CHAT MODE
-        // ============================================
-        const sessionId = currentSessionId;
+    /** Vuelve a pedir la última respuesta (desde el último mensaje del usuario). */
+    const handleRegenerate = () => {
+        if (isLoading || !ensureConnected()) return;
+        const msgs = currentSession.messages;
+        const lastUser = msgs.map(m => m.role).lastIndexOf('user');
+        if (lastUser >= 0) sendConversation(msgs.slice(0, lastUser + 1));
+    };
+
+    /** Editar un mensaje propio: vuelve al cuadro de texto y la conversación se corta ahí. */
+    const handleEditMessage = (msg: Message) => {
+        if (isLoading) return;
+        const idx = currentSession.messages.findIndex(m => m.id === msg.id);
+        if (idx < 0) return;
+        setInput(msg.content || '');
+        setAttachments(msg.attachments || []);
+        setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, messages: s.messages.slice(0, idx) } : s));
+    };
+
+    const handleSend = async () => {
+        if ((!input.trim() && attachments.length === 0) || isLoading || processingFiles > 0) return;
+
+        if (!ensureConnected()) return;
+
         const userMsg: Message = {
             id: Date.now().toString(),
             role: 'user',
@@ -730,17 +766,16 @@ export default function App() {
             timestamp: Date.now(),
             attachments: attachments.length ? [...attachments] : undefined
         };
-
-        const updatedMessages = [...currentSession.messages, userMsg];
-        const updatedSession = { ...currentSession, messages: updatedMessages };
-
-        if (currentSession.messages.length === 0) {
-            updatedSession.title = input.slice(0, 30) || attachments[0]?.name || 'Archivo adjunto';
-        }
-
-        setSessions(prev => prev.map(s => s.id === sessionId ? updatedSession : s));
+        const title = currentSession.messages.length === 0 ? (input.slice(0, 30) || attachments[0]?.name || 'Archivo adjunto') : undefined;
         setInput('');
         setAttachments([]);
+        await sendConversation([...currentSession.messages, userMsg], title);
+    };
+
+    /** Envía un historial (que termina en un mensaje del usuario) y agrega lo que responda el modelo. */
+    const sendConversation = async (updatedMessages: Message[], title?: string) => {
+        const sessionId = currentSessionId;
+        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, messages: updatedMessages, ...(title ? { title } : {}) } : s));
         setIsLoading(true);
 
         const controller = new AbortController();
@@ -1248,10 +1283,12 @@ export default function App() {
                             </p>
                         </div>
                     ) : (
-                        currentSession.messages.map((msg) => (
+                        currentSession.messages.map((msg, i, all) => (
                             <ChatMessage
                                 key={msg.id}
                                 msg={msg}
+                                onEdit={!isLoading && msg.role === 'user' ? handleEditMessage : undefined}
+                                onRegenerate={!isLoading && i === all.length - 1 && msg.role !== 'user' ? handleRegenerate : undefined}
                                 onCopy={async (m) => flash((await copyText(m.content || '')) ? 'Copiado' : 'No se pudo copiar')}
                                 onShare={handleShareMessage}
                             />

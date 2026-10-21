@@ -1,5 +1,5 @@
-import React from 'react';
-import { Images, AlertTriangle, LogOut, MessageSquare, Moon, Plus, Settings, Shield, ShieldOff, Sparkles, Sun, Terminal, Trash2, X } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Search, Images, AlertTriangle, LogOut, MessageSquare, Moon, Plus, Settings, Shield, ShieldOff, Sparkles, Sun, Terminal, Trash2, X } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 import { storageService } from '../services/storageService';
 import { ThemeOption } from '../types';
@@ -8,7 +8,17 @@ import { THEMES, LOGIN_REQUIRED } from '../config/defaults';
 export const Sidebar: React.FC<any> = ({
     isOpen, onClose, sessions, currentSessionId, setCurrentSessionId, handleNewChat, handleDeleteChat,
     settings, setSettings, setIsSettingsOpen, setIsManageModalOpen, setIsImageModalOpen, setIsGalleryOpen, onLogout
-}) => (
+}) => {
+    const [query, setQuery] = useState('');
+    // Busca en el título y en el texto de los mensajes
+    const visible = useMemo(() => {
+        const q = query.trim().toLowerCase();
+        if (!q) return sessions;
+        return sessions.filter((s: any) => s.title?.toLowerCase().includes(q) ||
+            s.messages?.some((m: any) => typeof m.content === 'string' && m.content.toLowerCase().includes(q)));
+    }, [sessions, query]);
+
+    return (
     <>
         {isOpen && (
             <div
@@ -27,7 +37,7 @@ export const Sidebar: React.FC<any> = ({
                             <span className="text-orange-600">Nodemat</span> <span className="text-text-main">Chat</span>
                         </div>
                     </div>
-                    <button onClick={onClose} className="text-text-muted hover:text-text-main p-1 rounded-md hover:bg-surface-highlight">
+                    <button onClick={onClose} aria-label="Cerrar menú" className="text-text-muted hover:text-text-main p-1 rounded-md hover:bg-surface-highlight">
                         <X size={20} />
                     </button>
                 </div>
@@ -57,8 +67,22 @@ export const Sidebar: React.FC<any> = ({
 
             </div>
 
+            <div className="px-3 pt-3">
+                <div className="relative">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+                    <input
+                        value={query}
+                        onChange={e => setQuery(e.target.value)}
+                        placeholder="Buscar en tus chats…"
+                        aria-label="Buscar en tus chats"
+                        className="w-full pl-8 pr-2 py-2 text-sm bg-background border border-border rounded-lg outline-none focus:ring-2 focus:ring-primary text-text-main"
+                    />
+                </div>
+            </div>
+
             <div className="flex-1 overflow-y-auto p-3 space-y-1">
-                {sessions.map((session: any) => (
+                {visible.length === 0 && <p className="text-xs text-text-muted text-center py-6">Ningún chat coincide.</p>}
+                {visible.map((session: any) => (
                     <div
                         key={session.id}
                         onClick={() => { setCurrentSessionId(session.id); onClose(); }}
@@ -73,7 +97,8 @@ export const Sidebar: React.FC<any> = ({
                         </div>
                         <button
                             onClick={(e) => handleDeleteChat(session.id, e)}
-                            className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-100 hover:text-red-500 rounded-lg transition-all"
+                            aria-label={`Borrar ${session.title}`}
+                            className="opacity-100 md:opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 hover:bg-red-100 hover:text-red-500 rounded-lg transition-all"
                         >
                             <Trash2 size={14} />
                         </button>
@@ -165,3 +190,4 @@ export const Sidebar: React.FC<any> = ({
         </div>
     </>
 );
+};
