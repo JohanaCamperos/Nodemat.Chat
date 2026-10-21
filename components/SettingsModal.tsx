@@ -161,6 +161,38 @@ export const SettingsModal: React.FC<any> = ({
                                 )}
                             </div>
 
+                            {/* ANTHROPIC CARD */}
+                            <div className={`border rounded-xl p-5 transition-all bg-surface ${settings.anthropicConnected ? 'border-green-200 bg-green-50/20' : 'border-border'}`}>
+                                <div className="flex items-center justify-between mb-4">
+                                    <div className="flex items-center gap-2 font-bold text-text-main">
+                                        <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer" className="hover:underline hover:text-primary transition-colors">Anthropic (Claude)</a>
+                                        {settings.anthropicConnected && <CheckCircle2 size={16} className="text-green-600" />}
+                                    </div>
+                                    <div className="flex gap-2">
+                                        {!settings.anthropicConnected ? (
+                                            <button
+                                                onClick={() => connectProvider('anthropic')}
+                                                disabled={!settings.anthropicKey}
+                                                className="flex items-center gap-2 px-3 py-1.5 bg-text-main text-text-inverted rounded-lg text-sm font-medium disabled:opacity-50 hover:opacity-90"
+                                            >
+                                                <Power size={14} /> Conectar
+                                            </button>
+                                        ) : (
+                                            <button onClick={() => disconnectProvider('anthropic')} className="text-red-500 text-xs font-medium hover:underline">Desconectar</button>
+                                        )}
+                                    </div>
+                                </div>
+                                <SecretInput placeholder="sk-ant-..." value={settings.anthropicKey} disabled={settings.anthropicConnected}
+                                    onChange={(e: any) => setSettings((s: AppSettings) => ({ ...s, anthropicKey: e.target.value }))}
+                                    className="w-full p-3 border border-border bg-background rounded-lg text-sm mb-3 focus:ring-2 focus:ring-primary outline-none disabled:opacity-60 text-text-main" />
+                                {settings.anthropicConnected && (
+                                    <div>
+                                        <label className="block text-xs font-semibold text-text-muted mb-1 uppercase">Modelo</label>
+                                        <SearchableSelect options={settings.anthropicModelsList} value={settings.anthropicModel} onChange={(val: string) => setSettings((s: AppSettings) => ({ ...s, anthropicModel: val }))} />
+                                    </div>
+                                )}
+                            </div>
+
 
 
                             {/* CEREBRAS CARD */}

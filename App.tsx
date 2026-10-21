@@ -84,6 +84,7 @@ export default function App() {
 
             check('geminiKey', 'geminiConnected');
             check('openaiKey', 'openaiConnected');
+            check('anthropicKey', 'anthropicConnected');
             check('groqKey', 'groqConnected');
             check('openRouterKey', 'openRouterConnected');
             check('cerebrasKey', 'cerebrasConnected');
@@ -101,7 +102,7 @@ export default function App() {
     // Ensure activeProvider is actually connected
     useEffect(() => {
         const connectedMap: Record<Provider, keyof AppSettings> = {
-            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
+            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected', anthropic: 'anthropicConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
             custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
@@ -109,7 +110,7 @@ export default function App() {
         const isCurrentConnected = settings[connectedMap[settings.activeProvider]];
         if (!isCurrentConnected) {
             // Find first connected provider
-            const providers: Provider[] = ['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'];
+            const providers: Provider[] = ['groq', 'openrouter', 'openai', 'anthropic', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'];
             const firstConnected = providers.find(p => settings[connectedMap[p]]);
 
             if (firstConnected) {
@@ -466,22 +467,22 @@ export default function App() {
     const connectProvider = async (provider: Provider) => {
         // Dynamic key mapping for all providers
         const keyMap: Record<Provider, keyof AppSettings> = {
-            groq: 'groqKey', openrouter: 'openRouterKey', openai: 'openaiKey',
+            groq: 'groqKey', openrouter: 'openRouterKey', openai: 'openaiKey', anthropic: 'anthropicKey',
             cerebras: 'cerebrasKey', gemini: 'geminiKey', xai: 'xaiKey',
             custom1: 'custom1Key', custom2: 'custom2Key', chatgpt: 'chatgptKey'
         };
         const connectedMap: Record<Provider, keyof AppSettings> = {
-            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
+            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected', anthropic: 'anthropicConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
             custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
         const modelsListMap: Record<Provider, keyof AppSettings> = {
-            groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
+            groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList', anthropic: 'anthropicModelsList',
             cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
             custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
         };
         const modelMap: Record<Provider, keyof AppSettings> = {
-            groq: 'groqModel', openrouter: 'openRouterModel', openai: 'openaiModel',
+            groq: 'groqModel', openrouter: 'openRouterModel', openai: 'openaiModel', anthropic: 'anthropicModel',
             cerebras: 'cerebrasModel', gemini: 'geminiModel', xai: 'xaiModel',
             custom1: 'custom1Model', custom2: 'custom2Model', chatgpt: 'chatgptModel'
         };
@@ -518,7 +519,7 @@ export default function App() {
 
     const disconnectProvider = (provider: Provider) => {
         const connectedMap: Record<Provider, keyof AppSettings> = {
-            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
+            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected', anthropic: 'anthropicConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
             custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
@@ -707,7 +708,7 @@ export default function App() {
         if ((!input.trim() && attachments.length === 0) || isLoading || processingFiles > 0) return;
 
         const connectedMap: Record<Provider, keyof AppSettings> = {
-            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
+            groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected', anthropic: 'anthropicConnected',
             cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
             custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
         };
@@ -986,7 +987,7 @@ export default function App() {
                             <label className="block text-xs font-semibold text-text-muted uppercase">Modelos disponibles</label>
                             {(() => {
                                 const modelsListMap: Record<Provider, keyof AppSettings> = {
-                                    groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
+                                    groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList', anthropic: 'anthropicModelsList',
                                     cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
                                     custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
                                 };
@@ -1029,7 +1030,7 @@ export default function App() {
                                     onClick={() => {
                                         if (newModelName.trim()) {
                                             const modelsListMap: Record<Provider, keyof AppSettings> = {
-                                                groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
+                                                groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList', anthropic: 'anthropicModelsList',
                                                 cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
                                                 custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
                                             };
@@ -1088,16 +1089,16 @@ export default function App() {
                         {/* Provider Selector - Clean Dropdown */}
                         {(() => {
                             const connectedMap: Record<Provider, keyof AppSettings> = {
-                                groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
+                                groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected', anthropic: 'anthropicConnected',
                                 cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
                                 custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
                             };
                             const labels: Record<Provider, string> = {
-                                groq: 'Groq Cloud', openrouter: 'OpenRouter', openai: 'OpenAI',
+                                groq: 'Groq Cloud', openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Claude',
                                 cerebras: 'Cerebras', gemini: 'Gemini', xai: 'xAI (Grok)',
                                 custom1: settings.custom1Name || 'Personalizado 1', custom2: settings.custom2Name || 'Personalizado 2', chatgpt: 'ChatGPT (cuenta)'
                             };
-                            const connectedProviders = (['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'] as Provider[]).filter(p => settings[connectedMap[p]]);
+                            const connectedProviders = (['groq', 'openrouter', 'openai', 'anthropic', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'] as Provider[]).filter(p => settings[connectedMap[p]]);
 
                             return (
                                 <div className="relative">
@@ -1123,21 +1124,21 @@ export default function App() {
                         {/* Model Switcher - Only show if a provider is connected */}
                         {(() => {
                             const connectedMap: Record<Provider, keyof AppSettings> = {
-                                groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
+                                groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected', anthropic: 'anthropicConnected',
                                 cerebras: 'cerebrasConnected', gemini: 'geminiConnected', xai: 'xaiConnected',
                                 custom1: 'custom1Connected', custom2: 'custom2Connected', chatgpt: 'chatgptConnected'
                             };
-                            const hasConnectedProvider = (['groq', 'openrouter', 'openai', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'] as Provider[]).some(p => settings[connectedMap[p]]);
+                            const hasConnectedProvider = (['groq', 'openrouter', 'openai', 'anthropic', 'cerebras', 'gemini', 'xai', 'custom1', 'custom2', 'chatgpt'] as Provider[]).some(p => settings[connectedMap[p]]);
 
                             if (!hasConnectedProvider) return null;
 
                             const modelsListMap: Record<Provider, keyof AppSettings> = {
-                                groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList',
+                                groq: 'groqModelsList', openrouter: 'openRouterModelsList', openai: 'openaiModelsList', anthropic: 'anthropicModelsList',
                                 cerebras: 'cerebrasModelsList', gemini: 'geminiModelsList', xai: 'xaiModelsList',
                                 custom1: 'custom1ModelsList', custom2: 'custom2ModelsList', chatgpt: 'chatgptModelsList'
                             };
                             const modelMap: Record<Provider, keyof AppSettings> = {
-                                groq: 'groqModel', openrouter: 'openRouterModel', openai: 'openaiModel',
+                                groq: 'groqModel', openrouter: 'openRouterModel', openai: 'openaiModel', anthropic: 'anthropicModel',
                                 cerebras: 'cerebrasModel', gemini: 'geminiModel', xai: 'xaiModel',
                                 custom1: 'custom1Model', custom2: 'custom2Model', chatgpt: 'chatgptModel'
                             };

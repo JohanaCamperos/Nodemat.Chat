@@ -51,6 +51,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
     openaiConnected: !!getEnv('REACT_APP_OPENAI_API_KEY', ''),
     openaiModelsList: ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
 
+    anthropicKey: getEnv('REACT_APP_ANTHROPIC_API_KEY', ''),
+    anthropicModel: 'claude-opus-5-5',
+    anthropicConnected: !!getEnv('REACT_APP_ANTHROPIC_API_KEY', ''),
+    anthropicModelsList: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'],
+
     cerebrasKey: getEnv('REACT_APP_CEREBRAS_API_KEY', ''),
     cerebrasModel: 'llama3.1-8b',
     cerebrasConnected: !!getEnv('REACT_APP_CEREBRAS_API_KEY', ''),

@@ -21,7 +21,7 @@ interface ImageGenModalProps {
 
 // La cuenta de ChatGPT no tiene acceso a las APIs de imágenes: no figura en IMAGE_PROVIDERS
 const KEY_MAP: Partial<Record<Provider, keyof AppSettings>> = {
-    groq: 'groqKey', openrouter: 'openRouterKey', openai: 'openaiKey', cerebras: 'cerebrasKey',
+    groq: 'groqKey', openrouter: 'openRouterKey', openai: 'openaiKey', anthropic: 'anthropicKey', cerebras: 'cerebrasKey',
     gemini: 'geminiKey', xai: 'xaiKey', custom1: 'custom1Key', custom2: 'custom2Key'
 };
 

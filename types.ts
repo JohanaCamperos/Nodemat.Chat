@@ -1,4 +1,4 @@
-export type Provider = 'groq' | 'openrouter' | 'openai' | 'cerebras' | 'gemini' | 'xai' | 'custom1' | 'custom2' | 'chatgpt';
+export type Provider = 'groq' | 'openrouter' | 'openai' | 'anthropic' | 'cerebras' | 'gemini' | 'xai' | 'custom1' | 'custom2' | 'chatgpt';
 
 export interface Message {
   id: string;
@@ -18,6 +18,10 @@ export interface Message {
     denied?: boolean;
     durationMs?: number;
   };
+  /** Bloques originales de la respuesta (Claude): se devuelven tal cual en el turno siguiente */
+  providerContent?: any[];
+  /** Resumen del razonamiento del modelo, si el proveedor lo devuelve */
+  reasoning?: string;
   usage?: {
     input: number;
     output: number;
@@ -208,6 +212,11 @@ export interface AppSettings {
   openaiConnected: boolean;
   openaiModelsList: string[];
 
+  anthropicKey: string;
+  anthropicModel: string;
+  anthropicConnected: boolean;
+  anthropicModelsList: string[];
+
 
 
   cerebrasKey: string;
@@ -283,6 +292,7 @@ export const PROVIDER_NAMES: Record<Provider, string> = {
   groq: 'Groq',
   openrouter: 'OpenRouter',
   openai: 'OpenAI',
+  anthropic: 'Anthropic (Claude)',
 
   cerebras: 'Cerebras',
   gemini: 'Gemini (AI Studio)',

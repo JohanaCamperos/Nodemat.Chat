@@ -32,6 +32,7 @@ Conecta con múltiples proveedores de IA desde la misma interfaz:
 - **Groq** - Inferencia ultrarrápida
 - **OpenRouter** - Acceso a cientos de modelos
 - **OpenAI** - GPT-4o, o1, etc.
+- **Anthropic (Claude)** - directo desde el navegador, con razonamiento visible, PDFs e imágenes
 - **Google Gemini** - Los modelos de Google AI
 - **xAI (Grok)** - El modelo de xAI
 - **Custom** - Cualquier API compatible con OpenAI

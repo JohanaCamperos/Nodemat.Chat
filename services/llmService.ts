@@ -32,6 +32,7 @@ import { AppSettings, Message, Provider, MCPTool, MCPServer, Attachment, ToolCal
 import { callServerTool, connectServer, getFriendlyMCPError, readSSE, MCPProgress } from "./mcpClient";
 import { validateArgs } from "./jsonSchema";
 import { imageCredentials, imageGenService, AspectRatio } from "./imageGenService";
+import { ANTHROPIC_DEFAULT_MODEL, ANTHROPIC_FALLBACK_MODELS, callAnthropic, fetchAnthropicModels } from "./anthropicProvider";
 import { bridgeHeaders, CHATGPT_BRIDGE_PATH } from "./bridge";
 import { ensureFreshChatGPTToken } from "./chatgptAuth";
 
@@ -71,6 +72,8 @@ const PROVIDER_ENDPOINTS: Record<Provider, { chat: string; models: string }> = {
         chat: 'https://api.x.ai/v1/chat/completions',
         models: 'https://api.x.ai/v1/models'
     },
+    // Anthropic tiene su propio formato: ver anthropicProvider.ts
+    anthropic: { chat: '', models: '' },
     // Proveedores personalizados - URLs se configuran dinámicamente
     custom1: { chat: '', models: '' },
     custom2: { chat: '', models: '' },
@@ -93,13 +96,13 @@ const FALLBACK_MODELS: Partial<Record<Provider, string[]>> = {
 const STREAM_USAGE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'xai', 'cerebras'];
 
 /** Proveedores que aceptan PDFs de forma nativa en el chat */
-const PDF_NATIVE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt'];
+const PDF_NATIVE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt', 'anthropic'];
 
 /**
  * Proveedores con visión: a ellos se les reenvían las imágenes que devuelven
  * las herramientas MCP (a los demás, sólo el texto, o la API rechazaría el turno).
  */
-const VISION_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt', 'xai'];
+const VISION_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt', 'xai', 'anthropic'];
 
 /** Máximo de rondas LLM <-> herramientas por mensaje del usuario */
 const MAX_TOOL_TURNS = 8;
@@ -120,6 +123,10 @@ export { getFriendlyMCPError };
  * formatos de respuesta ligeramente diferentes para su API de models.
  */
 export const fetchModels = async (provider: Provider, key: string, customUrl?: string): Promise<string[]> => {
+    if (provider === 'anthropic') {
+        const list = await fetchAnthropicModels(key);
+        return list.length ? list : ANTHROPIC_FALLBACK_MODELS;
+    }
     try {
         let endpoint = PROVIDER_ENDPOINTS[provider].models;
 
@@ -417,6 +424,8 @@ const toApiMessages = (history: Message[], provider: Provider): any[] => {
             out.push({ role: 'user', content: buildUserContent(m.content || '', m.attachments, provider) });
         } else if (m.role === 'model' || m.role === 'assistant') {
             const msg: any = { role: 'assistant', content: stripDataUrls(m.content) };
+            // Claude necesita sus bloques originales (thinking incluido) en los turnos siguientes
+            if (provider === 'anthropic' && m.providerContent?.length) msg.anthropic_content = m.providerContent;
             if (m.toolCalls && m.toolCalls.length > 0) {
                 msg.tool_calls = m.toolCalls;
                 out.push(msg);
@@ -437,7 +446,7 @@ const toApiMessages = (history: Message[], provider: Provider): any[] => {
                 });
                 const imgMsg = toolImagesMessage(toolImages, provider);
                 if (imgMsg) out.push(imgMsg);
-            } else if (msg.content) {
+            } else if (msg.content || msg.anthropic_content) {
                 out.push(msg);
             }
         }
@@ -533,7 +542,7 @@ const buildGeminiRequest = (apiMessages: any[], tools: any[]) => {
 };
 
 /** Los proveedores OpenAI-compatibles no conocen `thought_signature`. */
-const toOpenAIMessages = (apiMessages: any[]) => apiMessages.map(m => {
+const toOpenAIMessages = (apiMessages: any[]) => apiMessages.map(({ anthropic_content, ...m }) => {
     if (!m.tool_calls) return m;
     return {
         ...m,
@@ -560,6 +569,8 @@ const callLLMProvider = async (
     signal?: AbortSignal,
     onDelta?: (text: string) => void
 ) => {
+    if (provider === 'anthropic') return callAnthropic(key, model, apiMessages, tools, signal, onDelta);
+
     let endpoint = PROVIDER_ENDPOINTS[provider].chat;
     const stream = !!onDelta;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -720,6 +731,9 @@ interface ParsedResponse {
     content: string;
     toolCalls?: ToolCall[];
     images: Attachment[];
+    /** Bloques originales (Claude) y resumen del razonamiento */
+    providerContent?: any[];
+    reasoning?: string;
 }
 
 /**
@@ -785,7 +799,9 @@ const parseOpenAIResponse = (data: any): ParsedResponse => {
     return {
         content,
         images,
-        toolCalls: message.tool_calls?.length ? message.tool_calls : undefined
+        toolCalls: message.tool_calls?.length ? message.tool_calls : undefined,
+        providerContent: data.anthropic_content,
+        reasoning: data.reasoning || (typeof message.reasoning === 'string' ? message.reasoning : undefined)
     };
 };
 
@@ -944,6 +960,7 @@ export const resolveProvider = (settings: AppSettings): { key: string; model: st
         groq: { key: settings.groqKey, model: settings.groqModel || 'llama-3.1-8b-instant' },
         openrouter: { key: settings.openRouterKey, model: settings.openRouterModel || 'openai/gpt-4o-mini' },
         openai: { key: settings.openaiKey, model: settings.openaiModel || 'gpt-4o-mini' },
+        anthropic: { key: settings.anthropicKey, model: settings.anthropicModel || ANTHROPIC_DEFAULT_MODEL },
         cerebras: { key: settings.cerebrasKey, model: settings.cerebrasModel || 'llama3.1-8b' },
         gemini: { key: settings.geminiKey, model: settings.geminiModel || 'gemini-2.5-flash' },
         xai: { key: settings.xaiKey, model: settings.xaiModel || 'grok-3-mini' },
@@ -1115,6 +1132,8 @@ export const sendMessage = async (
                 role: 'model',
                 content: parsed.content,
                 attachments: parsed.images.length ? parsed.images : undefined,
+                providerContent: parsed.providerContent,
+                reasoning: parsed.reasoning,
                 timestamp: Date.now(),
                 usage,
                 rawDebug
@@ -1123,12 +1142,14 @@ export const sendMessage = async (
         }
 
         // El modelo quiere ejecutar herramientas
-        apiMessages.push({ role: 'assistant', content: parsed.content, tool_calls: parsed.toolCalls });
+        apiMessages.push({ role: 'assistant', content: parsed.content, tool_calls: parsed.toolCalls, anthropic_content: parsed.providerContent });
         emit({
             id: uid(),
             role: 'model',
             content: parsed.content,
             toolCalls: parsed.toolCalls,
+            providerContent: parsed.providerContent,
+            reasoning: parsed.reasoning,
             timestamp: Date.now(),
             usage,
             rawDebug

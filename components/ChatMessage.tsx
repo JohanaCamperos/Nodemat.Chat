@@ -72,6 +72,12 @@ export const ChatMessage: React.FC<Props> = ({ msg, onCopy, onShare }) => {
                     <div className="leading-relaxed">
                         {isAssistant ? (
                             <>
+                                {msg.reasoning && (
+                                    <details className="mb-2 text-xs text-text-muted group/reason">
+                                        <summary className="cursor-pointer select-none hover:text-text-main">Ver el razonamiento del modelo</summary>
+                                        <div className="mt-2 pl-3 border-l-2 border-border whitespace-pre-wrap leading-relaxed">{msg.reasoning}</div>
+                                    </details>
+                                )}
                                 {msg.content && <Markdown>{msg.content}</Markdown>}
                                 {/* Imágenes generadas por el modelo */}
                                 {imageAtts.length > 0 && (
