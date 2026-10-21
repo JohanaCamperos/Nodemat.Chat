@@ -36,6 +36,8 @@ Conecta con múltiples proveedores de IA desde la misma interfaz:
 - **xAI (Grok)** - El modelo de xAI
 - **Custom** - Cualquier API compatible con OpenAI
 
+Las respuestas llegan **en streaming** (palabra por palabra) con todos los proveedores, incluidas las llamadas a herramientas, y se pueden detener en cualquier momento.
+
 ### 4. 🛠️ Cliente MCP (Model Context Protocol)
 Nodemat se conecta a **cualquier tipo de servidor MCP** y muestra en el chat cada llamada y su resultado, para estudiar el ciclo agéntico.
 

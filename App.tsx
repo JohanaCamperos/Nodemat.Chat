@@ -23,6 +23,7 @@ import { StorageWarningModal, getStorageUsage } from './components/StorageWarnin
 import { SystemPromptModal } from './components/SystemPromptModal';
 import { DeleteChatModal } from './components/DeleteChatModal';
 import { ChatMessage } from './components/ChatMessage';
+import { Markdown } from './components/Markdown';
 import { THEMES, DEFAULT_SETTINGS, INITIAL_SESSION, LOGIN_REQUIRED } from './config/defaults';
 
 // Safe Env Access (supports both REACT_APP_ and VITE_ prefixes)
@@ -166,6 +167,8 @@ export default function App() {
     const [serverRequest, setServerRequest] = useState<PendingServerRequest | null>(null);
     const [isMCPLibraryOpen, setIsMCPLibraryOpen] = useState(false);
     const [toolProgress, setToolProgress] = useState<{ tool: string; progress: MCPProgress } | null>(null);
+    /** Respuesta que el modelo está escribiendo (streaming) */
+    const [streamText, setStreamText] = useState<string | null>(null);
 
     // Lo que los servidores MCP pueden pedirle o avisarle a la app
     useEffect(() => {
@@ -287,8 +290,13 @@ export default function App() {
     }, [sessions, currentSessionId, settings.incognitoMode, isStorageReady]);
 
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [currentSession.messages]);
+        const end = messagesEndRef.current;
+        const box = end?.parentElement;
+        if (!end || !box) return;
+        // Mientras llega texto, seguir abajo sólo si el usuario no subió a leer
+        const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 200;
+        if (!streamText || nearBottom) end.scrollIntoView({ behavior: streamText ? 'auto' : 'smooth' });
+    }, [currentSession.messages, streamText]);
 
     // --- Handlers ---
     const handleBackupSessions = () => {
@@ -741,7 +749,8 @@ export default function App() {
                 onSettingsPatch: (patch) => setSettings(s => ({ ...s, ...patch })),
                 sessionId,
                 signal: controller.signal,
-                onToolProgress: (tool, progress) => setToolProgress(progress ? { tool, progress } : null)
+                onToolProgress: (tool, progress) => setToolProgress(progress ? { tool, progress } : null),
+                onStream: (text) => setStreamText(text)
             });
             showMessages(newMessages);
         } catch (error: any) {
@@ -757,6 +766,7 @@ export default function App() {
             abortRef.current = null;
             setIsLoading(false);
             setToolProgress(null);
+            setStreamText(null);
         }
     };
 
@@ -1225,7 +1235,15 @@ export default function App() {
                             />
                         ))
                     )}
-                    {isLoading && (
+                    {isLoading && streamText && !pendingTool && (
+                        <div className="flex justify-start" aria-live="polite">
+                            <div className="max-w-[90%] md:max-w-[80%] p-4 rounded-2xl rounded-bl-none shadow-sm bg-surface border border-border text-text-main leading-relaxed">
+                                <Markdown>{streamText}</Markdown>
+                                <span className="inline-block w-2 h-4 align-middle bg-primary/70 animate-pulse ml-0.5" aria-hidden="true" />
+                            </div>
+                        </div>
+                    )}
+                    {isLoading && (!streamText || pendingTool) && (
                         <div className="flex justify-start animate-pulse">
                             <div className="bg-surface p-4 rounded-2xl rounded-bl-none text-text-muted text-sm border border-border">
                                 {pendingTool ? `Esperando tu aprobación para ${pendingTool.originalName}…`

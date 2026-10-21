@@ -88,6 +88,9 @@ const FALLBACK_MODELS: Partial<Record<Provider, string[]>> = {
     custom2: []
 };
 
+/** Proveedores que informan tokens en streaming sólo si se pide `stream_options.include_usage` */
+const STREAM_USAGE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'xai', 'cerebras'];
+
 /** Proveedores que aceptan PDFs de forma nativa en el chat */
 const PDF_NATIVE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt'];
 
@@ -439,15 +442,19 @@ const callLLMProvider = async (
     apiMessages: any[],
     tools: any[],
     settings: AppSettings,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onDelta?: (text: string) => void
 ) => {
     let endpoint = PROVIDER_ENDPOINTS[provider].chat;
+    const stream = !!onDelta;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     let requestPayload: any;
 
     // Configuración específica por proveedor
     if (provider === 'gemini') {
         endpoint = endpoint.replace('{model}', encodeURIComponent(model));
+        // Streaming en Gemini: otro método (streamGenerateContent) y SSE con alt=sse
+        if (stream) endpoint = endpoint.replace(':generateContent', ':streamGenerateContent') + '?alt=sse';
         headers['x-goog-api-key'] = key;
         requestPayload = buildGeminiRequest(apiMessages, tools);
     } else {
@@ -465,7 +472,10 @@ const callLLMProvider = async (
             model: model,
             messages: toOpenAIMessages(apiMessages),
             tools: tools.length > 0 ? tools : undefined,
-            tool_choice: tools.length > 0 ? "auto" : undefined
+            tool_choice: tools.length > 0 ? "auto" : undefined,
+            ...(stream ? { stream: true } : {}),
+            // Sin esto, OpenAI no informa el uso de tokens cuando hay streaming
+            ...(stream && STREAM_USAGE_PROVIDERS.includes(provider) ? { stream_options: { include_usage: true } } : {})
         };
     }
 
@@ -488,9 +498,104 @@ const callLLMProvider = async (
         throw new Error(msg);
     }
 
+    // Algunos proveedores compatibles ignoran `stream`: entonces llega JSON común
+    const isSSE = (response.headers.get('content-type') || '').includes('text/event-stream');
+    if (stream && isSSE && response.body) {
+        const data = provider === 'gemini'
+            ? await collectGeminiStream(response.body, onDelta!)
+            : await collectOpenAIStream(response.body, onDelta!);
+        return { data, requestPayload };
+    }
     const responseData = await response.json();
     return { data: responseData, requestPayload };
 };
+
+// ============================================================================
+// STREAMING
+// ============================================================================
+
+/**
+ * EDUCATIVO: con `stream: true` la API no devuelve una respuesta sino muchos
+ * pedacitos (chunks) por SSE. Cada uno trae un `delta`: unas palabras de texto
+ * o un fragmento de una llamada a herramienta (¡los argumentos JSON también
+ * llegan por partes!). Acá los vamos juntando y al final armamos el mismo
+ * objeto que devolvería la API sin streaming, así el resto del código no cambia.
+ */
+export async function collectOpenAIStream(body: ReadableStream<Uint8Array>, onDelta: (text: string) => void) {
+    let content = '';
+    let id: string | undefined;
+    let usage: any;
+    const images: any[] = [];
+    const toolCalls: any[] = [];
+    let streamError: string | undefined;
+
+    await readSSE(body, (_event, data) => {
+        if (data.trim() === '[DONE]') return true;
+        let chunk: any;
+        try { chunk = JSON.parse(data); } catch { return; }
+        if (chunk.error) { streamError = chunk.error.message || JSON.stringify(chunk.error); return true; }
+        id = id || chunk.id;
+        usage = chunk.usage || chunk.x_groq?.usage || usage;
+        const delta = chunk.choices?.[0]?.delta || {};
+        if (typeof delta.content === 'string' && delta.content) {
+            content += delta.content;
+            onDelta(content);
+        }
+        if (Array.isArray(delta.images)) images.push(...delta.images);
+        (delta.tool_calls || []).forEach((tc: any) => {
+            const i = tc.index ?? toolCalls.length;
+            const cur = toolCalls[i] || (toolCalls[i] = { id: '', type: 'function', function: { name: '', arguments: '' } });
+            if (tc.id) cur.id = tc.id;
+            if (tc.function?.name) cur.function.name += tc.function.name;
+            if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
+        });
+    });
+
+    if (streamError) throw new Error(streamError);
+    const calls = toolCalls.filter(Boolean).map((tc, i) => ({ ...tc, id: tc.id || `call_${Date.now()}_${i}` }));
+    return {
+        id,
+        usage,
+        choices: [{ message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}), ...(images.length ? { images } : {}) } }]
+    };
+}
+
+/** Gemini manda respuestas parciales completas: se concatenan las `parts`. */
+export async function collectGeminiStream(body: ReadableStream<Uint8Array>, onDelta: (text: string) => void) {
+    const parts: any[] = [];
+    let text = '';
+    let usageMetadata: any;
+    let responseId: string | undefined;
+    let promptFeedback: any;
+
+    await readSSE(body, (_event, data) => {
+        let chunk: any;
+        try { chunk = JSON.parse(data); } catch { return; }
+        if (chunk.error) throw new Error(chunk.error.message || 'Error de Gemini');
+        usageMetadata = chunk.usageMetadata || usageMetadata;
+        responseId = responseId || chunk.responseId;
+        promptFeedback = chunk.promptFeedback || promptFeedback;
+        (chunk.candidates?.[0]?.content?.parts || []).forEach((p: any) => {
+            const last = parts[parts.length - 1];
+            // Los pedazos de texto consecutivos son UNA parte (si no, quedarían saltos de línea de más)
+            if (typeof p.text === 'string' && last && typeof last.text === 'string' && !!last.thought === !!p.thought && !p.thoughtSignature) {
+                last.text += p.text;
+            } else {
+                parts.push({ ...p });
+            }
+            if (typeof p.text === 'string' && !p.thought) {
+                text += p.text;
+                onDelta(text);
+            }
+        });
+    });
+
+    return {
+        responseId,
+        usageMetadata,
+        ...(parts.length ? { candidates: [{ content: { role: 'model', parts } }] } : { promptFeedback })
+    };
+}
 
 // ============================================================================
 // RESPONSE PARSERS
@@ -610,7 +715,7 @@ const callChatGPT = async (
     apiMessages: any[],
     tools: any[],
     settings: AppSettings,
-    options: { signal?: AbortSignal; onSettingsPatch?: (p: Partial<AppSettings>) => void; sessionId?: string }
+    options: { signal?: AbortSignal; onSettingsPatch?: (p: Partial<AppSettings>) => void; sessionId?: string; onDelta?: (text: string) => void }
 ): Promise<{ data: any; requestPayload: any; parsed: ParsedResponse }> => {
     const requestPayload = {
         model,
@@ -673,11 +778,15 @@ const callChatGPT = async (
     const items: any[] = [];
     let completed: any = null;
     let failure: string | null = null;
+    let streamed = '';
 
     await readSSE(res.body, (_event, raw) => {
         let ev: any;
         try { ev = JSON.parse(raw); } catch { return; }
         switch (ev.type) {
+            case 'response.output_text.delta':
+                if (typeof ev.delta === 'string') { streamed += ev.delta; options.onDelta?.(streamed); }
+                break;
             case 'response.output_item.done':
                 if (ev.item) items.push(ev.item);
                 break;
@@ -779,6 +888,11 @@ export interface SendMessageOptions {
     onSettingsPatch?: (patch: Partial<AppSettings>) => void;
     /** Identificador estable de la conversación (cache de prompts en ChatGPT). */
     sessionId?: string;
+    /**
+     * Texto parcial de la respuesta mientras el modelo la escribe (streaming).
+     * null = terminó ese turno. Si no se pasa, no se pide streaming.
+     */
+    onStream?: (partialText: string | null) => void;
     /** Avisos de progreso de una herramienta en curso (si el servidor los manda). */
     onToolProgress?: (toolName: string, progress: MCPProgress | null) => void;
 }
@@ -841,12 +955,13 @@ export const sendMessage = async (
         let data: any, requestPayload: any, parsed: ParsedResponse;
         if (activeProvider === 'chatgpt') {
             ({ data, requestPayload, parsed } = await callChatGPT(model, apiMessages, activeToolsDefs, liveSettings, {
-                signal, onSettingsPatch: patchSettings, sessionId: options.sessionId
+                signal, onSettingsPatch: patchSettings, sessionId: options.sessionId, onDelta: options.onStream
             }));
         } else {
-            ({ data, requestPayload } = await callLLMProvider(activeProvider, key, model, apiMessages, activeToolsDefs, settings, signal));
+            ({ data, requestPayload } = await callLLMProvider(activeProvider, key, model, apiMessages, activeToolsDefs, settings, signal, options.onStream));
             parsed = activeProvider === 'gemini' ? parseGeminiResponse(data) : parseOpenAIResponse(data);
         }
+        options.onStream?.(null);
 
         const usage = data.usage ? {
             input: data.usage.prompt_tokens || data.usage.input_tokens || 0,
