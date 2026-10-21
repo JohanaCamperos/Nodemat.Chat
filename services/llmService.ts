@@ -254,20 +254,71 @@ const buildUserContent = (text: string, attachments: Attachment[] | undefined, p
     if (!attachments || attachments.length === 0) return text;
 
     const parts: any[] = [{ type: "text", text: text || "" }];
+    const inline = (name: string, body: string) => { parts[0].text += `\n\n--- Archivo Adjunto: ${name} ---\n${body}\n-------------------`; };
     attachments.forEach(att => {
         if (att.type.startsWith('image/')) {
             parts.push({ type: "image_url", image_url: { url: att.data } });
         } else if (att.type === 'application/pdf') {
             if (PDF_NATIVE_PROVIDERS.includes(provider)) {
                 parts.push({ type: "file", file: { filename: att.name, file_data: att.data } });
+            } else if (att.extractedText) {
+                // Sin PDF nativo: el modelo lee el texto que sacamos con pdf.js
+                inline(att.name, att.extractedText);
             } else {
-                parts[0].text += `\n\n[Adjunto PDF "${att.name}" omitido: este proveedor no acepta PDFs. Usa OpenAI, OpenRouter o Gemini.]`;
+                parts[0].text += `\n\n[Adjunto PDF "${att.name}" omitido: no se pudo extraer su texto y este proveedor no acepta PDFs.]`;
             }
+        } else if (att.extractedText) {
+            // Word, Excel, PowerPoint, OpenDocument y audio: va el texto extraído / transcripto
+            inline(att.name, att.extractedText);
         } else {
-            parts[0].text += `\n\n--- Archivo Adjunto: ${att.name} ---\n${att.data}\n-------------------`;
+            inline(att.name, att.data);
         }
     });
     return parts;
+};
+
+// ============================================================================
+// ARCHIVOS PARA LAS HERRAMIENTAS MCP
+// ============================================================================
+
+/**
+ * EDUCATIVO: el modelo no puede "pasarle" un archivo a una herramienta (sólo
+ * escribe texto JSON). Entonces le damos una referencia corta por archivo
+ * subido, `nodemat://adjunto/<nombre>`, y cuando la usa como argumento Nodemat
+ * la reemplaza por el contenido real antes de llamar al servidor MCP:
+ *   - archivos binarios -> base64 (sin el prefijo data:)
+ *   - texto             -> el texto
+ *   - `?formato=dataurl` -> data URL completa; `?formato=texto` -> texto extraído
+ */
+export const FILE_REF_PREFIX = 'nodemat://adjunto/';
+
+export const buildFileRefs = (history: Message[]): Map<string, Attachment> => {
+    const refs = new Map<string, Attachment>();
+    history.forEach(m => (m.role === 'user' || m.role === 'tool' || m.role === 'model') && (m.attachments || []).forEach(att => {
+        let ref = FILE_REF_PREFIX + encodeURIComponent(att.name);
+        for (let n = 2; refs.has(ref) && refs.get(ref) !== att; n++) ref = `${FILE_REF_PREFIX}${encodeURIComponent(att.name)}-${n}`;
+        refs.set(ref, att);
+    }));
+    return refs;
+};
+
+const fileRefValue = (att: Attachment, format: string | null): string => {
+    const isDataUrl = att.data.startsWith('data:');
+    if (format === 'texto') return att.extractedText || (isDataUrl ? '' : att.data);
+    if (format === 'dataurl') return isDataUrl ? att.data : `data:${att.type || 'text/plain'};base64,${btoa(unescape(encodeURIComponent(att.data)))}`;
+    return isDataUrl ? att.data.slice(att.data.indexOf(',') + 1) : att.data;
+};
+
+/** Reemplaza (en profundidad) las referencias a adjuntos por su contenido. */
+export const resolveFileRefs = (value: any, refs: Map<string, Attachment>): any => {
+    if (typeof value === 'string' && value.startsWith(FILE_REF_PREFIX)) {
+        const [ref, query] = value.split('?');
+        const att = refs.get(ref);
+        return att ? fileRefValue(att, new URLSearchParams(query || '').get('formato')) : value;
+    }
+    if (Array.isArray(value)) return value.map(v => resolveFileRefs(v, refs));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, resolveFileRefs(v, refs)]));
+    return value;
 };
 
 /**
@@ -928,8 +979,15 @@ export const sendMessage = async (
 
     const { bindings, defs: activeToolsDefs } = buildToolRegistry(settings.mcpServers);
 
+    const fileRefs = buildFileRefs(history);
     if (activeToolsDefs.length > 0) {
         systemInstruction += "\n\nTienes acceso a herramientas externas (MCP). Úsalas cuando sea necesario.";
+        if (fileRefs.size > 0) {
+            systemInstruction += "\n\nArchivos de esta conversación que puedes pasarle a una herramienta: usa la referencia como valor del argumento " +
+                "y Nodemat la reemplaza por el contenido (base64 si es binario, texto si es texto; agrega ?formato=dataurl para una data URL " +
+                "o ?formato=texto para el texto extraído):\n" +
+                [...fileRefs.entries()].map(([ref, att]) => `- ${ref} (${att.type || 'desconocido'}${att.size ? `, ${att.size} bytes` : ''})`).join('\n');
+        }
         // La spec MCP permite que el servidor envíe "instructions" para el modelo
         const withInstructions = new Set(Object.values(bindings).map(b => b.server));
         withInstructions.forEach(s => {
@@ -1053,7 +1111,7 @@ export const sendMessage = async (
 
                 if (approved) {
                     try {
-                        const r = await callServerTool(binding.server, binding.originalName, args, signal,
+                        const r = await callServerTool(binding.server, binding.originalName, resolveFileRefs(args, fileRefs), signal,
                             p => options.onToolProgress?.(binding.originalName, p));
                         resultText = r.text || '(sin contenido)';
                         images = r.attachments;

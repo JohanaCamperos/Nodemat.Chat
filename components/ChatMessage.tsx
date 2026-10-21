@@ -1,5 +1,6 @@
 import React from 'react';
-import { Copy, FileText, Paperclip, Share2 } from 'lucide-react';
+import { Copy, Share2 } from 'lucide-react';
+import { AttachmentIcon } from './AttachmentIcon';
 import { Message } from '../types';
 import { ChatImage } from './ChatImage';
 import { Markdown } from './Markdown';
@@ -53,12 +54,17 @@ export const ChatMessage: React.FC<Props> = ({ msg, onCopy, onShare }) => {
                     {fileAtts.length > 0 && (
                         <div className="flex flex-wrap gap-2 mb-3">
                             {fileAtts.map((att, i) => (
-                                <button key={i} onClick={() => downloadAttachment(att)} title="Descargar"
-                                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs border max-w-[220px] ${isUser ? 'bg-white/10 border-white/20' : 'bg-surface-highlight border-border'}`}>
-                                    {att.type === 'application/pdf' ? <FileText size={16} /> : <Paperclip size={16} />}
-                                    <span className="truncate">{att.name}</span>
-                                    {att.size ? <span className="opacity-70 shrink-0">{formatBytes(att.size)}</span> : null}
-                                </button>
+                                <div key={i} className="flex flex-col gap-1.5">
+                                    <button onClick={() => downloadAttachment(att)} title={att.extractedText ? 'Descargar (el modelo recibió el texto extraído)' : 'Descargar'}
+                                        className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs border max-w-[240px] ${isUser ? 'bg-white/10 border-white/20' : 'bg-surface-highlight border-border'}`}>
+                                        <AttachmentIcon type={att.type} name={att.name} />
+                                        <span className="truncate">{att.name}</span>
+                                        {att.size ? <span className="opacity-70 shrink-0">{formatBytes(att.size)}</span> : null}
+                                    </button>
+                                    {att.type.startsWith('audio/') && att.data.startsWith('data:') && (
+                                        <audio controls src={att.data} className="h-9 max-w-[260px]" aria-label={`Reproducir ${att.name}`} />
+                                    )}
+                                </div>
                             ))}
                         </div>
                     )}

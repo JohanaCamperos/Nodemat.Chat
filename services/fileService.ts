@@ -10,7 +10,9 @@
  * - Exportar / importar conversaciones (JSON y Markdown)
  */
 
-import { Attachment, ChatSession, Message } from '../types';
+import { AppSettings, Attachment, ChatSession, Message } from '../types';
+import { extractDocx, extractOpenDocument, extractPdf, extractPptx, extractSpreadsheet } from './documentService';
+import { MAX_AUDIO_BYTES, transcribeAudio } from './transcriptionService';
 
 // ============================================================================
 // LÍMITES Y TIPOS PERMITIDOS
@@ -19,6 +21,7 @@ import { Attachment, ChatSession, Message } from '../types';
 export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;  // se reduce luego
 export const MAX_PDF_BYTES = 15 * 1024 * 1024;
 export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+export const MAX_DOCUMENT_BYTES = 30 * 1024 * 1024;
 const MAX_IMAGE_SIDE = 2048;
 
 const TEXT_EXTENSIONS = [
@@ -27,17 +30,26 @@ const TEXT_EXTENSIONS = [
     'cpp', 'hpp', 'cs', 'go', 'rs', 'rb', 'php', 'swift', 'sql', 'sh', 'bash', 'ps1', 'bat', 'r', 'lua', 'dart', 'vue', 'svelte'
 ];
 
-export const ACCEPT_ATTRIBUTE = ['image/*', 'application/pdf', ...TEXT_EXTENSIONS.map(e => `.${e}`)].join(',');
+/** Documentos de oficina: se guarda el original y se le pasa al modelo el texto extraído */
+const DOCUMENT_EXTENSIONS = ['docx', 'xlsx', 'xlsm', 'xls', 'ods', 'pptx', 'odt', 'odp'];
+const AUDIO_EXTENSIONS = ['mp3', 'wav', 'm4a', 'ogg', 'oga', 'opus', 'webm', 'flac', 'aac', 'mp4', 'mpeg', 'mpga'];
+
+export const ACCEPT_ATTRIBUTE = [
+    'image/*', 'audio/*', 'application/pdf',
+    ...[...TEXT_EXTENSIONS, ...DOCUMENT_EXTENSIONS, ...AUDIO_EXTENSIONS].map(e => `.${e}`)
+].join(',');
 
 const extOf = (name: string) => name.toLowerCase().split('.').pop() || '';
 
-export type FileKind = 'image' | 'pdf' | 'text' | 'unsupported';
+export type FileKind = 'image' | 'pdf' | 'text' | 'document' | 'audio' | 'unsupported';
 
 export function classifyFile(file: File): FileKind {
     // SVG es texto (XML): los modelos de visión no lo aceptan como imagen
     if (file.type === 'image/svg+xml' || extOf(file.name) === 'svg') return 'text';
     if (file.type.startsWith('image/')) return 'image';
     if (file.type === 'application/pdf' || extOf(file.name) === 'pdf') return 'pdf';
+    if (DOCUMENT_EXTENSIONS.includes(extOf(file.name))) return 'document';
+    if (file.type.startsWith('audio/') || (AUDIO_EXTENSIONS.includes(extOf(file.name)) && !file.type.startsWith('video/'))) return 'audio';
     if (file.type.startsWith('text/') || file.type === 'application/json' || TEXT_EXTENSIONS.includes(extOf(file.name))) return 'text';
     return 'unsupported';
 }
@@ -88,27 +100,104 @@ async function downscaleImage(file: File): Promise<{ data: string; type: string 
     return { data: canvas.toDataURL(type, 0.88), type };
 }
 
+/** Tipo MIME correcto aunque el navegador no lo sepa (pasa con .xlsx, .odt, audios…) */
+const MIME_BY_EXT: Record<string, string> = {
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    xlsm: 'application/vnd.ms-excel.sheet.macroEnabled.12',
+    xls: 'application/vnd.ms-excel',
+    ods: 'application/vnd.oasis.opendocument.spreadsheet',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    odt: 'application/vnd.oasis.opendocument.text',
+    odp: 'application/vnd.oasis.opendocument.presentation',
+    mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg',
+    webm: 'audio/webm', flac: 'audio/flac', aac: 'audio/aac'
+};
+
+const mimeOf = (file: File) => MIME_BY_EXT[extOf(file.name)] || file.type || 'application/octet-stream';
+
+/** Data URL con el tipo correcto (el navegador suele poner application/octet-stream) */
+const readAsTypedDataUrl = async (file: File) =>
+    (await readAs(file, 'dataURL')).replace(/^data:[^;,]*/, `data:${mimeOf(file)}`);
+
+/** Texto del documento según su formato. */
+async function extractDocumentText(file: File): Promise<string> {
+    const buf = await file.arrayBuffer();
+    const ext = extOf(file.name);
+    if (ext === 'docx') return extractDocx(buf);
+    if (['xlsx', 'xlsm', 'xls', 'ods'].includes(ext)) {
+        const { text, sheets } = await extractSpreadsheet(buf);
+        return `[Planilla con ${sheets} hoja(s); cada hoja va como CSV]\n\n${text}`;
+    }
+    if (ext === 'pptx') {
+        const { text, slides } = await extractPptx(buf);
+        return `[Presentación de ${slides} diapositiva(s)]\n\n${text}`;
+    }
+    return extractOpenDocument(buf);   // odt, odp
+}
+
+export interface FileToAttachmentOptions {
+    /** Necesario para transcribir audios (usa la API key de Groq, OpenAI o Gemini) */
+    settings?: AppSettings;
+}
+
 /**
  * Convierte un File en Attachment. Lanza un Error con mensaje legible si no se puede.
+ *
+ * - `data` guarda siempre el archivo original (data URL, o el texto si es texto plano):
+ *   sirve para descargarlo y para pasárselo a herramientas MCP.
+ * - `extractedText` es lo que lee el modelo cuando no puede abrir el formato.
  */
-export async function fileToAttachment(file: File): Promise<Attachment> {
+export async function fileToAttachment(file: File, opts: FileToAttachmentOptions = {}): Promise<Attachment> {
     const kind = classifyFile(file);
+    const tooBig = (max: number) => new Error(`"${file.name}" supera ${formatBytes(max)}.`);
 
     if (kind === 'image') {
-        if (file.size > MAX_IMAGE_INPUT_BYTES) throw new Error(`"${file.name}" supera ${formatBytes(MAX_IMAGE_INPUT_BYTES)}.`);
+        if (file.size > MAX_IMAGE_INPUT_BYTES) throw tooBig(MAX_IMAGE_INPUT_BYTES);
         const { data, type } = await downscaleImage(file);
         const name = file.name || `imagen-pegada-${Date.now()}.${type.split('/')[1]}`;
         return { name, type, data, size: Math.round(data.length * 0.75) };
     }
     if (kind === 'pdf') {
-        if (file.size > MAX_PDF_BYTES) throw new Error(`"${file.name}" supera ${formatBytes(MAX_PDF_BYTES)}.`);
-        return { name: file.name, type: 'application/pdf', data: await readAs(file, 'dataURL'), size: file.size };
+        if (file.size > MAX_PDF_BYTES) throw tooBig(MAX_PDF_BYTES);
+        const data = await readAs(file, 'dataURL');
+        // El texto se usa con proveedores que no aceptan PDF (y si el PDF es escaneado, viene vacío)
+        let extractedText: string | undefined;
+        try {
+            const { text, pages } = await extractPdf(await file.arrayBuffer());
+            extractedText = text.replace(/--- Página \d+ ---\s*/g, '').trim()
+                ? `[PDF de ${pages} página(s)]\n\n${text}`
+                : `[PDF de ${pages} página(s) sin texto seleccionable (probablemente escaneado)]`;
+        } catch { /* PDF protegido o dañado: queda sólo el original */ }
+        return { name: file.name, type: 'application/pdf', data, size: file.size, extractedText };
     }
     if (kind === 'text') {
-        if (file.size > MAX_TEXT_BYTES) throw new Error(`"${file.name}" supera ${formatBytes(MAX_TEXT_BYTES)}.`);
+        if (file.size > MAX_TEXT_BYTES) throw tooBig(MAX_TEXT_BYTES);
         return { name: file.name, type: file.type || 'text/plain', data: await readAs(file, 'text'), size: file.size };
     }
-    throw new Error(`El tipo de "${file.name}" no está soportado. Se aceptan imágenes, PDF y archivos de texto/código.`);
+    if (kind === 'document') {
+        if (file.size > MAX_DOCUMENT_BYTES) throw tooBig(MAX_DOCUMENT_BYTES);
+        let extractedText: string;
+        try {
+            extractedText = await extractDocumentText(file);
+        } catch (e: any) {
+            throw new Error(`No se pudo leer "${file.name}": ${e?.message || e}`);
+        }
+        return { name: file.name, type: mimeOf(file), data: await readAsTypedDataUrl(file), size: file.size, extractedText };
+    }
+    if (kind === 'audio') {
+        if (file.size > MAX_AUDIO_BYTES) throw tooBig(MAX_AUDIO_BYTES);
+        let extractedText: string;
+        try {
+            if (!opts.settings) throw new Error('sin ajustes');
+            const text = await transcribeAudio(file, file.name, opts.settings);
+            extractedText = `[Transcripción del audio "${file.name}"]\n${text || '(sin habla reconocible)'}`;
+        } catch (e: any) {
+            extractedText = `[Audio "${file.name}": no se pudo transcribir (${e?.message || e})]`;
+        }
+        return { name: file.name, type: mimeOf(file), data: await readAsTypedDataUrl(file), size: file.size, extractedText };
+    }
+    throw new Error(`El tipo de "${file.name}" no está soportado. Se aceptan imágenes, PDF, audio, documentos de Office/OpenDocument y archivos de texto o código.`);
 }
 
 // ============================================================================

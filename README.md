@@ -88,7 +88,11 @@ Permite usar tu suscripción de ChatGPT en lugar de una API key, con el mismo lo
 OpenAI (`gpt-image-1`, DALL·E), OpenRouter (modelos con salida de imagen), Gemini (`*-image` e Imagen) y xAI. Formatos, varias imágenes, edición con imágenes de referencia, insertar en el chat, compartir y descargar. Las imágenes se guardan en base64 para que no expiren.
 
 ### 6. 📎 Archivos y Compartir
-Imágenes (reducidas automáticamente), PDF (OpenAI / OpenRouter / Gemini) y archivos de texto/código. Arrastrar y soltar, pegar desde el portapapeles, exportar conversaciones a Markdown/JSON, importar backups y compartir con la hoja nativa del sistema.
+- **Imágenes** (se reducen automáticamente), **PDF** (nativo en OpenAI, OpenRouter y Gemini; en el resto se envía su texto, extraído con pdf.js) y **texto o código**.
+- **Word, Excel, PowerPoint y OpenDocument** (`.docx`, `.xlsx`, `.xls`, `.pptx`, `.odt`, `.ods`, `.odp`): se guarda el original y el modelo recibe el texto (cada hoja de cálculo como CSV, cada diapositiva con sus notas).
+- **Audio** (`.mp3`, `.wav`, `.m4a`, `.ogg`…): se transcribe con Groq (Whisper), OpenAI o Gemini, según la clave que tengas, y se puede escuchar en el chat. El botón 🎤 **dicta** el mensaje.
+- **Archivos para las herramientas MCP:** cada adjunto tiene una referencia `nodemat://adjunto/<nombre>`; cuando el modelo la usa como argumento, Nodemat la reemplaza por el contenido (base64, texto o data URL), así una herramienta puede, por ejemplo, subir el archivo a tu Drive.
+- Arrastrar y soltar, pegar desde el portapapeles, exportar conversaciones a Markdown/JSON, importar backups y compartir con la hoja nativa del sistema.
 
 ---
 

@@ -24,6 +24,8 @@ import { SystemPromptModal } from './components/SystemPromptModal';
 import { DeleteChatModal } from './components/DeleteChatModal';
 import { ChatMessage } from './components/ChatMessage';
 import { Markdown } from './components/Markdown';
+import { AttachmentIcon } from './components/AttachmentIcon';
+import { DictationButton } from './components/DictationButton';
 import { THEMES, DEFAULT_SETTINGS, INITIAL_SESSION, LOGIN_REQUIRED } from './config/defaults';
 
 // Safe Env Access (supports both REACT_APP_ and VITE_ prefixes)
@@ -169,6 +171,7 @@ export default function App() {
     const [toolProgress, setToolProgress] = useState<{ tool: string; progress: MCPProgress } | null>(null);
     /** Respuesta que el modelo está escribiendo (streaming) */
     const [streamText, setStreamText] = useState<string | null>(null);
+    const [processingFiles, setProcessingFiles] = useState(0);
 
     // Lo que los servidores MCP pueden pedirle o avisarle a la app
     useEffect(() => {
@@ -637,20 +640,21 @@ export default function App() {
 
     // --- Adjuntos: input, drag & drop y pegar desde el portapapeles ---
     const addFiles = async (files: File[]) => {
-        const newAttachments: Attachment[] = [];
+        setShowFileUploadModal(false);
         const errors: string[] = [];
-
-        for (const file of files) {
+        // Leer, extraer texto o transcribir puede tardar: se muestra cuántos faltan
+        setProcessingFiles(n => n + files.length);
+        await Promise.all(files.map(async (file) => {
             try {
-                newAttachments.push(await fileToAttachment(file));
+                const att = await fileToAttachment(file, { settings: settingsRef.current });
+                setAttachments(prev => [...prev, att]);
             } catch (err: any) {
                 errors.push(err.message || `Error leyendo ${file.name}`);
+            } finally {
+                setProcessingFiles(n => n - 1);
             }
-        }
-
-        if (newAttachments.length > 0) setAttachments(prev => [...prev, ...newAttachments]);
-        if (errors.length > 0) alert(errors.join('\n'));
-        setShowFileUploadModal(false);
+        }));
+        if (errors.length > 0) flash(errors.join(' · '));
     };
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -694,7 +698,7 @@ export default function App() {
     };
 
     const handleSend = async () => {
-        if ((!input.trim() && attachments.length === 0) || isLoading) return;
+        if ((!input.trim() && attachments.length === 0) || isLoading || processingFiles > 0) return;
 
         const connectedMap: Record<Provider, keyof AppSettings> = {
             groq: 'groqConnected', openrouter: 'openRouterConnected', openai: 'openaiConnected',
@@ -1259,21 +1263,27 @@ export default function App() {
                 <div className="p-4 md:p-6 bg-surface border-t border-border">
                     <div className="max-w-4xl mx-auto w-full">
 
-                        {attachments.length > 0 && (
+                        {(attachments.length > 0 || processingFiles > 0) && (
                             <div className="flex gap-2 mb-3 overflow-x-auto py-2">
+                                {processingFiles > 0 && (
+                                    <div className="h-16 px-3 shrink-0 bg-surface-highlight flex items-center gap-2 rounded-lg border border-border text-xs text-text-muted" role="status">
+                                        <RefreshCw size={14} className="animate-spin" /> Procesando {processingFiles} archivo{processingFiles > 1 ? 's' : ''}…
+                                    </div>
+                                )}
                                 {attachments.map((att, i) => (
                                     <div key={i} className="relative group shrink-0 animate-in zoom-in-90 duration-200">
                                         {att.type.startsWith('image/') ? (
                                             <img src={att.data} alt={att.name} title={att.name} className="h-16 w-16 object-cover rounded-lg border border-border shadow-sm" />
                                         ) : (
                                             <div className="h-16 w-28 bg-surface-highlight flex flex-col items-center justify-center gap-1 rounded-lg border border-border text-[10px] text-text-muted font-medium p-1 text-center shadow-sm" title={att.name}>
-                                                {att.type === 'application/pdf' ? <FileText size={18} className="text-red-500" /> : <FileCode size={18} />}
+                                                <AttachmentIcon type={att.type} name={att.name} size={18} className={att.type === 'application/pdf' ? 'text-red-500' : ''} />
                                                 <span className="truncate w-full">{att.name}</span>
                                                 {att.size ? <span className="opacity-70">{formatBytes(att.size)}</span> : null}
                                             </div>
                                         )}
                                         <button
                                             onClick={() => setAttachments(prev => prev.filter((_, idx) => idx !== i))}
+                                            aria-label={`Quitar ${att.name}`}
                                             className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5 hover:bg-red-600 shadow-md transition-transform hover:scale-110"
                                         >
                                             <X size={12} />
@@ -1314,6 +1324,13 @@ export default function App() {
                                 />
                             </div>
 
+                            <DictationButton
+                                settings={settings}
+                                disabled={isLoading}
+                                onText={(text) => setInput(prev => prev ? `${prev.trimEnd()} ${text}` : text)}
+                                onError={flash}
+                            />
+
                             {hasMCPLibrary && (
                                 <button
                                     onClick={() => setIsMCPLibraryOpen(true)}
@@ -1346,7 +1363,7 @@ export default function App() {
                             ) : (
                                 <button
                                     onClick={handleSend}
-                                    disabled={!input.trim() && attachments.length === 0}
+                                    disabled={(!input.trim() && attachments.length === 0) || processingFiles > 0}
                                     className={`p-3 rounded-xl transition-all shadow-sm ${!input.trim() && attachments.length === 0
                                         ? 'bg-surface-highlight text-text-muted cursor-not-allowed'
                                         : 'bg-primary text-white hover:bg-primary-hover hover:scale-105 active:scale-95'
