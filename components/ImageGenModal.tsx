@@ -14,7 +14,8 @@ interface ImageGenModalProps {
     onAttach?: (attachments: Attachment[]) => void;
 }
 
-const KEY_MAP: Record<Provider, keyof AppSettings> = {
+// La cuenta de ChatGPT no tiene acceso a las APIs de imágenes: no figura en IMAGE_PROVIDERS
+const KEY_MAP: Partial<Record<Provider, keyof AppSettings>> = {
     groq: 'groqKey', openrouter: 'openRouterKey', openai: 'openaiKey', cerebras: 'cerebrasKey',
     gemini: 'geminiKey', xai: 'xaiKey', custom1: 'custom1Key', custom2: 'custom2Key'
 };
@@ -41,7 +42,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
     const abortRef = useRef<AbortController | null>(null);
     const refInput = useRef<HTMLInputElement>(null);
 
-    const keyFor = (p: Provider) => (settings[KEY_MAP[p]] as string) || '';
+    const keyFor = (p: Provider) => { const k = KEY_MAP[p]; return k ? (settings[k] as string) || '' : ''; };
     const customUrlFor = (p: Provider) => p === 'custom1' ? settings.custom1Url : p === 'custom2' ? settings.custom2Url : undefined;
     const providerLabel = (p: Provider) => p === 'custom1' ? settings.custom1Name : p === 'custom2' ? settings.custom2Name : PROVIDER_NAMES[p];
 

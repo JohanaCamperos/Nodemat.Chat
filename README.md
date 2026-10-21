@@ -1,8 +1,8 @@
 # 🤖 Nodemat Chat
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![React](https://img.shields.io/badge/React-19-61DAFB.svg)
-![Vite](https://img.shields.io/badge/Vite-7-646CFF.svg)
+![React](https://img.shields.io/badge/React-18-61DAFB.svg)
+![Vite](https://img.shields.io/badge/Vite-6-646CFF.svg)
 
 **Nodemat Chat** es una plataforma de código abierto diseñada para **aprender cómo funcionan los Modelos de Lenguaje (LLMs) a través de sus APIs**. Todo se desarrolla y ejecuta en local, sin necesidad de un servidor backend, lo que la convierte en una herramienta ideal para experimentación y educación.
 
@@ -80,8 +80,8 @@ Imágenes (reducidas automáticamente), PDF (OpenAI / OpenRouter / Gemini) y arc
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/tu-usuario/nodemat-chat.git
-cd nodemat-chat
+git clone https://github.com/diegoparras/Nodemat-Chat.git
+cd Nodemat-Chat
 
 # 2. Instalar dependencias
 npm install
@@ -94,7 +94,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Abre `http://localhost:5173` en tu navegador.
+Abre `http://localhost:3000` en tu navegador.
 
 ---
 
@@ -195,8 +195,8 @@ nodemat-chat/
 
 | Categoría | Tecnología |
 | :--- | :--- |
-| Framework | React 19 + TypeScript |
-| Build | Vite 7 |
+| Framework | React 18 + TypeScript |
+| Build | Vite 6 |
 | Estilos | Tailwind CSS |
 | Iconos | Lucide React |
 | Persistencia | IndexedDB (idb-keyval) |
