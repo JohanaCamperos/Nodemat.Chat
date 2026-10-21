@@ -1,14 +1,15 @@
 import React from 'react';
-import { AlertCircle, AlertTriangle, CheckCircle2, Cpu, Globe, Key, Lock, Plug, Plus, Power, RefreshCw, Server, Settings, Settings2, Trash2, Wrench, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Cpu, Globe, Key, Plus, Power, RefreshCw, Settings, Settings2, X } from 'lucide-react';
 import { ChatGPTAccountCard } from './ChatGPTAccountCard';
 import { SearchableSelect } from './SearchableSelect';
 import { SecretInput } from './SecretInput';
-import { AppSettings, MCPTransport, MCPAuthType } from '../types';
+import { AppSettings, MCPServer } from '../types';
+import { MCPServerCard } from './MCPServerCard';
 
 export const SettingsModal: React.FC<any> = ({
     isOpen, onClose, settings, setSettings, connectProvider, disconnectProvider,
     isConnectingGroq, isConnectingOpenRouter, addMCPServer, removeMCPServer,
-    connectMCPServer, disconnectMCPServer, toggleMCPTool, openModelsManager
+    connectMCPServer, disconnectMCPServer, toggleMCPTool, openModelsManager, updateMCPServer, cancelMCPServer
 }) => {
     if (!isOpen) return null;
     return (
@@ -376,7 +377,7 @@ export const SettingsModal: React.FC<any> = ({
                     <section className="border-t border-border pt-6">
                         <div className="mb-4">
                             <label className="block text-lg font-semibold text-text-main flex items-center gap-2">
-                                <Cpu size={20} /> Servidores MCP (Herramientas Locales)
+                                <Cpu size={20} /> Servidores MCP
                             </label>
                         </div>
 
@@ -393,251 +394,27 @@ export const SettingsModal: React.FC<any> = ({
                             <div className="flex items-start gap-2 text-xs text-orange-600 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/10 p-2 rounded border border-orange-100 dark:border-orange-900/30">
                                 <AlertTriangle size={14} className="shrink-0 mt-0.5" />
                                 <p>
-                                    <strong>Importante:</strong> Los servidores deben soportar <strong>CORS</strong> para funcionar en el navegador: permitir este origen, los headers <code>Mcp-Session-Id</code> y <code>MCP-Protocol-Version</code>, y exponer <code>Mcp-Session-Id</code>. Servidores <code>stdio</code> necesitan un puente HTTP (ej. <code>npx supergateway --stdio "..." --outputTransport streamableHttp --cors</code>).
+                                    <strong>Importante:</strong> desde el navegador, un servidor remoto tiene que permitir <strong>CORS</strong>; si no, activa
+                                    <strong> "Conectar vía proxy"</strong>. Los servidores de tipo comando (<code>npx …</code>) se agregan con transporte
+                                    <strong> "Comando local (stdio)"</strong> y requieren Nodemat corriendo en tu máquina.
                                 </p>
                             </div>
                         </div>
 
                         <div className="space-y-4">
-                            {/* Render existing servers */}
-                            {settings.mcpServers.map((server: any, idx: number) => (
-                                <div key={server.id} className="bg-surface p-4 rounded-xl space-y-4 border border-border shadow-sm">
-                                    <div className="flex justify-between items-start">
-                                        <h4 className="font-bold text-text-main flex items-center gap-2 text-sm min-w-0">
-                                            <Server size={14} className="shrink-0" />
-                                            <span className="truncate">{server.name || server.serverInfo?.name || `Servidor #${idx + 1}`}</span>
-                                            {server.status === 'connected' && <span className="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Conectado" />}
-                                        </h4>
-                                        <button onClick={() => removeMCPServer(server.id)} className="text-text-muted hover:text-red-500">
-                                            <Trash2 size={16} />
-                                        </button>
-                                    </div>
-
-                                    <div className="space-y-4">
-                                        <div className="flex flex-col md:flex-row gap-4">
-                                            <div className="flex-[2]">
-                                                <label className="block text-xs font-medium text-text-muted mb-1 uppercase flex items-center gap-1">
-                                                    <Globe size={12} /> URL
-                                                </label>
-                                                <input
-                                                    type="text"
-                                                    value={server.url}
-                                                    disabled={server.status === 'connected'}
-                                                    onChange={(e: any) => {
-                                                        const val = e.target.value;
-                                                        setSettings((s: AppSettings) => ({
-                                                            ...s,
-                                                            mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, url: val } : srv)
-                                                        }));
-                                                    }}
-                                                    className="w-full p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none font-mono disabled:opacity-60"
-                                                />
-                                            </div>
-                                            <div className="flex-1">
-                                                <label className="block text-xs font-medium text-text-muted mb-1 uppercase">Transporte</label>
-                                                <select
-                                                    value={server.transport}
-                                                    disabled={server.status === 'connected'}
-                                                    onChange={(e: any) => {
-                                                        const val = e.target.value as MCPTransport;
-                                                        setSettings((s: AppSettings) => ({
-                                                            ...s,
-                                                            mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, transport: val } : srv)
-                                                        }));
-                                                    }}
-                                                    className="w-full p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none disabled:opacity-60"
-                                                >
-                                                    <option value="auto">Auto (recomendado)</option>
-                                                    <option value="http-stream">Streamable HTTP (/mcp)</option>
-                                                    <option value="sse">SSE legacy (/sse)</option>
-                                                </select>
-                                            </div>
-                                        </div>
-
-                                        {/* Row 2: Authentication */}
-                                        <div className="flex flex-col md:flex-row gap-4 bg-surface-highlight/30 p-3 rounded-lg border border-border/50">
-                                            <div className="flex-1">
-                                                <label className="block text-xs font-medium text-text-muted mb-1 uppercase flex items-center gap-1">
-                                                    <Lock size={12} /> Autenticación
-                                                </label>
-                                                <select
-                                                    value={server.authType}
-                                                    disabled={server.status === 'connected'}
-                                                    onChange={(e: any) => {
-                                                        const val = e.target.value as MCPAuthType;
-                                                        setSettings((s: AppSettings) => ({
-                                                            ...s,
-                                                            mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, authType: val } : srv)
-                                                        }));
-                                                    }}
-                                                    className="w-full p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none disabled:opacity-60"
-                                                >
-                                                    <option value="none">Ninguna</option>
-                                                    <option value="api-key">API Key</option>
-                                                    <option value="oauth">Bearer / OAuth (token manual)</option>
-                                                </select>
-                                            </div>
-
-                                            {server.authType === 'api-key' && (
-                                                <div className="flex-1">
-                                                    <label className="block text-xs font-medium text-text-muted mb-1 uppercase">Header</label>
-                                                    <input
-                                                        type="text"
-                                                        placeholder="Authorization"
-                                                        value={server.authHeader || ''}
-                                                        disabled={server.status === 'connected'}
-                                                        onChange={(e: any) => {
-                                                            const val = e.target.value;
-                                                            setSettings((s: AppSettings) => ({
-                                                                ...s,
-                                                                mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, authHeader: val } : srv)
-                                                            }));
-                                                        }}
-                                                        className="w-full p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none font-mono disabled:opacity-60"
-                                                        title="Vacío = 'Authorization: Bearer <key>'. Ej: X-API-Key"
-                                                    />
-                                                </div>
-                                            )}
-
-                                            {server.authType !== 'none' && (
-                                                <div className="flex-[2] animate-in fade-in slide-in-from-left-2">
-                                                    <label className="block text-xs font-medium text-text-muted mb-1 uppercase flex items-center gap-1">
-                                                        <Key size={12} /> Token / Key
-                                                    </label>
-                                                    <SecretInput
-                                                        value={server.authToken}
-                                                        disabled={server.status === 'connected'}
-                                                        onChange={(e: any) => {
-                                                            const val = e.target.value;
-                                                            setSettings((s: AppSettings) => ({
-                                                                ...s,
-                                                                mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, authToken: val } : srv)
-                                                            }));
-                                                        }}
-                                                        className="w-full p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none font-mono disabled:opacity-60"
-                                                    />
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    <label className="flex items-start gap-2 text-xs text-text-muted cursor-pointer select-none">
-                                        <input
-                                            type="checkbox"
-                                            className="mt-0.5"
-                                            checked={!!server.useProxy}
-                                            disabled={server.status === 'connected'}
-                                            onChange={(e: any) => {
-                                                const val = e.target.checked;
-                                                setSettings((s: AppSettings) => ({
-                                                    ...s,
-                                                    mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, useProxy: val } : srv)
-                                                }));
-                                            }}
-                                        />
-                                        <span>
-                                            <strong className="text-text-main">Conectar vía proxy</strong> — evita el bloqueo CORS pasando por <code>/api/mcp</code> de esta app
-                                            (necesario para n8n Cloud). El proxy no guarda nada y sólo conecta con servidores https públicos.
-                                        </span>
-                                    </label>
-
-                                    {/* Actions & Status */}
-                                    <div className="flex items-center gap-3 pt-2">
-                                        {server.status === 'connected' ? (
-                                            <button
-                                                onClick={() => disconnectMCPServer(server.id)}
-                                                className="flex items-center gap-2 px-4 py-2 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800 rounded-lg font-medium text-sm transition-all"
-                                            >
-                                                <Power size={16} /> Desconectar
-                                            </button>
-                                        ) : (
-                                            <button
-                                                onClick={() => connectMCPServer(server.id)}
-                                                disabled={server.status === 'loading'}
-                                                className="flex items-center gap-2 px-4 py-2 bg-text-main text-text-inverted hover:opacity-90 rounded-lg font-medium text-sm transition-all disabled:opacity-70"
-                                            >
-                                                {server.status === 'loading' ? <RefreshCw className="animate-spin" size={16} /> : <Plug size={16} />}
-                                                {server.status === 'loading' ? 'Conectando...' : 'Conectar Servidor'}
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    {/* Connection info (educativo: qué se negoció en el handshake) */}
-                                    {server.status === 'connected' && (
-                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-text-muted bg-green-50/50 dark:bg-green-900/10 border border-green-200/60 dark:border-green-800/30 rounded-lg p-3">
-                                            {server.serverInfo && <span><strong className="text-text-main">{server.serverInfo.name}</strong>{server.serverInfo.version ? ` v${server.serverInfo.version}` : ''}</span>}
-                                            {server.resolvedTransport && <span>Transporte: <code>{server.resolvedTransport}</code></span>}
-                                            {server.protocolVersion && <span>Protocolo: <code>{server.protocolVersion}</code></span>}
-                                            <label className="flex items-center gap-2 ml-auto cursor-pointer select-none">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={!!server.autoApprove}
-                                                    onChange={(e: any) => {
-                                                        const val = e.target.checked;
-                                                        setSettings((s: AppSettings) => ({
-                                                            ...s,
-                                                            mcpServers: s.mcpServers.map((srv: any) => srv.id === server.id ? { ...srv, autoApprove: val } : srv)
-                                                        }));
-                                                    }}
-                                                />
-                                                Ejecutar sin pedir confirmación
-                                            </label>
-                                        </div>
-                                    )}
-
-                                    {/* Error Banner */}
-                                    {server.status === 'error' && (
-                                        <div className="mt-3 p-4 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800/30 rounded-lg flex items-start gap-3 animate-in slide-in-from-top-2">
-                                            <AlertCircle className="text-red-600 dark:text-red-400 shrink-0 mt-0.5" size={20} />
-                                            <div className="flex-1">
-                                                <h5 className="text-sm font-bold text-red-700 dark:text-red-300 mb-1">Error de conexión</h5>
-                                                <p className="text-sm text-red-600 dark:text-red-400 leading-relaxed whitespace-pre-wrap">
-                                                    {server.errorMessage}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* Tools Selector */}
-                                    {server.status === 'connected' && server.tools.length > 0 && (
-                                        <div className="mt-4 p-4 bg-surface-highlight/50 rounded-xl border border-border animate-in fade-in">
-                                            <h5 className="font-semibold text-sm mb-3 flex items-center gap-2 text-text-main">
-                                                <Wrench size={16} className="text-primary" />
-                                                Herramientas ({server.enabledTools.length}/{server.tools.length})
-                                            </h5>
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                {server.tools.map((tool: any) => {
-                                                    const isEnabled = server.enabledTools.includes(tool.name);
-                                                    return (
-                                                        <div
-                                                            key={tool.name}
-                                                            onClick={() => toggleMCPTool(server.id, tool.name)}
-                                                            className={`p-3 rounded-lg border cursor-pointer transition-all hover:shadow-sm flex items-start gap-3 ${isEnabled
-                                                                ? 'bg-surface border-primary ring-1 ring-primary'
-                                                                : 'bg-background border-border hover:bg-surface'
-                                                                }`}
-                                                        >
-                                                            <div className={`mt-0.5 w-5 h-5 rounded border flex items-center justify-center transition-colors ${isEnabled ? 'bg-primary border-primary' : 'bg-transparent border-gray-400'
-                                                                }`}>
-                                                                {isEnabled && <CheckCircle2 size={12} className="text-white" />}
-                                                            </div>
-                                                            <div className="flex-1 min-w-0">
-                                                                <div className={`text-sm font-bold truncate flex items-center gap-1.5 ${isEnabled ? 'text-primary' : 'text-text-main'}`}>
-                                                                    <span className="truncate">{tool.title || tool.name}</span>
-                                                                    {tool.annotations?.readOnlyHint && <span className="text-[9px] px-1.5 rounded bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300 shrink-0">lectura</span>}
-                                                                    {tool.annotations?.destructiveHint && !tool.annotations?.readOnlyHint && <span className="text-[9px] px-1.5 rounded bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 shrink-0">destructiva</span>}
-                                                                </div>
-                                                                <div className="text-xs text-text-muted line-clamp-2 leading-relaxed">
-                                                                    {tool.description || 'Sin descripción.'}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
+                            {settings.mcpServers.map((server: MCPServer, idx: number) => (
+                                <MCPServerCard
+                                    key={server.id}
+                                    server={server}
+                                    index={idx}
+                                    update={(patch) => updateMCPServer(server.id, patch)}
+                                    onConnect={() => connectMCPServer(server.id)}
+                                    onAuthorize={() => connectMCPServer(server.id, { authorize: true })}
+                                    onCancel={() => cancelMCPServer(server.id)}
+                                    onDisconnect={() => disconnectMCPServer(server.id)}
+                                    onRemove={() => removeMCPServer(server.id)}
+                                    onToggleTool={(name) => toggleMCPTool(server.id, name)}
+                                />
                             ))}
                             <div className="flex flex-col md:flex-row md:items-center gap-2 text-xs text-text-muted bg-surface p-3 rounded-xl border border-border">
                                 <label className="font-medium uppercase flex items-center gap-1 shrink-0"><Key size={12} /> Token del proxy</label>

@@ -37,30 +37,44 @@ Conecta con múltiples proveedores de IA desde la misma interfaz:
 - **Custom** - Cualquier API compatible con OpenAI
 
 ### 4. 🛠️ Cliente MCP (Model Context Protocol)
-Aprende cómo las IAs pueden ejecutar herramientas externas mediante el protocolo MCP.
-- Handshake completo (`initialize` → `notifications/initialized` → `tools/list` paginado)
-- Transportes **Streamable HTTP** (`/mcp`, spec 2025-06-18) y **SSE legacy** (`/sse`), con detección automática
-- Manejo de sesión (`Mcp-Session-Id`) y reconexión transparente si la sesión expira
-- Resultados con texto, imágenes, recursos y `structuredContent`
-- Aprobación por herramienta, "permitir siempre" y auto-aprobación por servidor; avisos para herramientas destructivas
-- Las llamadas y resultados quedan visibles en el chat para estudiar el ciclo agéntico
+Nodemat se conecta a **cualquier tipo de servidor MCP** y muestra en el chat cada llamada y su resultado, para estudiar el ciclo agéntico.
+
+**Versiones del protocolo.** Habla las dos eras y detecta sola cuál usa cada servidor:
+- **Moderna (2026-07-28, la vigente):** sin handshake ni sesión; `server/discover`, metadatos por petición (`_meta`), headers `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*`, pedidos de varios pasos (`input_required`) y `subscriptions/listen`.
+- **Clásica (2024-11-05 a 2025-11-25):** `initialize`, sesión `Mcp-Session-Id`, pedidos del servidor por el stream y GET de avisos.
+
+**Transportes.**
+- **Streamable HTTP** (`/mcp`) y **SSE antiguo** (`/sse`), con detección automática.
+- **Comando local (stdio):** servidores que se lanzan con `npx …`, `uvx …` o `node …`. El navegador no puede ejecutar procesos, así que lo hace el puente `/api/mcp-stdio`, que sólo existe cuando Nodemat corre en tu máquina (`npm run dev` o `npm start`), sólo acepta peticiones desde la misma máquina y se apaga con `MCP_STDIO_DISABLED=1`.
+
+**Autenticación.**
+- **OAuth 2.1 completo** para servidores como GitHub, Notion, Linear, Atlassian o Sentry: descubrimiento (RFC 9728 / 8414), registro dinámico del cliente (RFC 7591), PKCE, `resource` (RFC 8707) y renovación automática del token. Si el proveedor no permite el registro automático, se carga un Client ID propio (la URL de retorno es `https://tu-dominio/oauth/callback`).
+- Token Bearer, API key en cualquier header y **headers adicionales** propios.
+
+**Funciones.**
+- **Herramientas** con aprobación, "permitir siempre", auto-aprobación por servidor, avisos para herramientas destructivas, validación de argumentos contra el `inputSchema` antes de llamar, **progreso en vivo** y cancelación.
+- Las **imágenes** que devuelve una herramienta llegan al modelo (proveedores con visión) además de mostrarse.
+- **Recursos y prompts:** el botón 📖 del chat los lista para adjuntar un recurso (o una plantilla de URI) o usar un prompt con sus argumentos.
+- **Sampling** (el servidor pide una respuesta de tu modelo) y **elicitación** (formularios o abrir una URL), siempre con tu aprobación.
+- Si la lista de herramientas cambia, se actualiza sola.
+- "Detalle de la conexión" muestra cada paso del intento de conexión.
 
 #### Usar un MCP de n8n (o cualquier servidor sin CORS)
-La app incluye un **proxy same-origin** (`/api/mcp`, función serverless de Vercel; en desarrollo lo monta Vite). Como el navegador le habla al mismo dominio de la app, no hay CORS.
+La app incluye un **proxy same-origin** (`/api/mcp`, función serverless de Vercel; en local lo monta Vite). Como el navegador le habla al mismo dominio de la app, no hay CORS.
 1. En n8n, agrega un nodo **MCP Server Trigger**, activa el workflow y copia la *Production URL*.
 2. En Nodemat → Ajustes → Servidores MCP: pega la URL, deja **"Conectar vía proxy"** activado y conecta.
 3. Si n8n pide autenticación (Bearer o header), cárgala en "Autenticación"; el proxy la reenvía.
 
-**No hace falta configurar nada en Vercel.** El proxy no guarda nada y aplica reglas fijas: sólo servidores `https` públicos (bloquea IPs privadas, `localhost` y nombres que resuelven a la red interna). Opcionalmente, quien despliega puede endurecerlo con `MCP_PROXY_ALLOWED_HOSTS` y `NODEMAT_PROXY_TOKEN` (ver `.env.example`). En local (`npm run dev`) el proxy también acepta servidores de tu red.
+**No hace falta configurar nada en Vercel.** El proxy no guarda nada y aplica reglas fijas: sólo servidores `https` públicos (bloquea IPs privadas, `localhost` y nombres que resuelven a la red interna). Opcionalmente, quien despliega puede endurecerlo con `MCP_PROXY_ALLOWED_HOSTS` y `NODEMAT_PROXY_TOKEN` (ver `.env.example`). En local el proxy también acepta servidores de tu red.
 
 #### 🔒 Todo queda en tu navegador
-API keys, sesión de ChatGPT, servidores MCP, ajustes y conversaciones se guardan sólo en el navegador (localStorage + IndexedDB). En **Gestión de Datos → Configuración** puedes exportar todo a un archivo `.json` (cifrado con contraseña, AES-GCM) e importarlo en otra PC.
+API keys, sesión de ChatGPT, servidores MCP (y sus tokens OAuth), ajustes y conversaciones se guardan sólo en el navegador (localStorage + IndexedDB). En **Gestión de Datos → Configuración** puedes exportar todo a un archivo `.json` (cifrado con contraseña, AES-GCM) e importarlo en otra PC.
 
-> Límites: cada llamada pasa por una función de Vercel con `maxDuration` de 60 s (configurable en `vercel.json` según tu plan). Con proxy, prefiere **Streamable HTTP**: el transporte SSE legacy mantiene un stream abierto que Vercel corta a los 60 s (Nodemat reconecta, pero una herramienta en curso puede fallar).
+> Límites: cada llamada pasa por una función de Vercel con `maxDuration` de 60 s (configurable en `vercel.json` según tu plan). Con proxy, prefiere **Streamable HTTP**: el transporte SSE antiguo mantiene un stream abierto que Vercel corta a los 60 s (Nodemat reconecta, pero una herramienta en curso puede fallar).
 >
-> Seguridad: el proxy bloquea a *otros sitios web* desde el navegador, pero sin `NODEMAT_PROXY_TOKEN` cualquiera que conozca tu URL de Vercel podría usar `/api/mcp` (hacia servidores https públicos) y `/api/chatgpt` con sus propias credenciales, consumiendo tu cuota de Vercel. Es el precio de no tener configuración en el servidor.
+> Seguridad: el proxy bloquea a *otros sitios web* desde el navegador, pero sin `NODEMAT_PROXY_TOKEN` cualquiera que conozca tu URL de Vercel podría usar `/api/mcp` (hacia servidores https públicos) y `/api/chatgpt` con sus propias credenciales, consumiendo tu cuota de Vercel. Si defines `NODEMAT_PROXY_TOKEN`, carga el mismo valor en Ajustes → Servidores MCP → "Token del proxy".
 
-> Sin proxy, los servidores MCP deben permitir CORS (origen, headers `Mcp-Session-Id` y `MCP-Protocol-Version`, y exponer `Mcp-Session-Id`). Para servidores `stdio`, usa un puente como `npx supergateway --stdio "<comando>" --outputTransport streamableHttp --cors`.
+> Sin proxy, los servidores MCP remotos deben permitir CORS (origen, headers `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, y exponer `Mcp-Session-Id`).
 
 ### 🧪 Cuenta de ChatGPT (experimental)
 Permite usar tu suscripción de ChatGPT en lugar de una API key, con el mismo login OAuth que Codex CLI / OpenClaw (`/api/chatgpt` hace de puente porque `auth.openai.com` y `chatgpt.com` no permiten CORS). Los tokens se guardan sólo en tu navegador y se renuevan solos.

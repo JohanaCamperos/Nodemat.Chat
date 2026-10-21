@@ -64,16 +64,28 @@ export interface ChatSession {
  * - 'auto': prueba Streamable HTTP (spec 2025-03-26+) y si falla cae a SSE legacy.
  * - 'http-stream': Streamable HTTP (un solo endpoint, POST + respuestas JSON o SSE).
  * - 'sse': transporte HTTP+SSE legacy (spec 2024-11-05: GET /sse + POST al endpoint anunciado).
+ * - 'stdio': un comando local (ej. `npx -y @modelcontextprotocol/server-filesystem`).
+ *   El navegador no puede lanzar procesos: lo hace el puente /api/mcp-stdio, que sólo
+ *   existe cuando Nodemat corre en tu máquina (npm run dev / npm start).
  */
-export type MCPTransport = 'auto' | 'sse' | 'http-stream';
-export type MCPAuthType = 'none' | 'api-key' | 'oauth';
+export type MCPTransport = 'auto' | 'sse' | 'http-stream' | 'stdio';
+
+/**
+ * - 'none'    : sin autenticación
+ * - 'api-key' : clave en un header (por defecto Authorization: Bearer)
+ * - 'bearer'  : token Bearer pegado a mano
+ * - 'oauth'   : OAuth 2.1 completo (descubrimiento, registro dinámico y PKCE)
+ */
+export type MCPAuthType = 'none' | 'api-key' | 'bearer' | 'oauth';
 
 export interface MCPTool {
   name: string;
   title?: string;
   description?: string;
   inputSchema: any;
+  outputSchema?: any;
   annotations?: {
+    title?: string;
     readOnlyHint?: boolean;
     destructiveHint?: boolean;
     idempotentHint?: boolean;
@@ -81,25 +93,88 @@ export interface MCPTool {
   };
 }
 
+export interface MCPResource {
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export interface MCPResourceTemplate {
+  uriTemplate: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+}
+
+export interface MCPPrompt {
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: { name: string; description?: string; required?: boolean }[];
+}
+
+/** Estado OAuth de un servidor MCP (todo queda en el navegador). */
+export interface MCPOAuthState {
+  /** Client ID propio (opcional): si falta se usa el registro dinámico */
+  clientId?: string;
+  clientSecret?: string;
+  scope?: string;
+  /** Lo que se descubre / obtiene durante el flujo */
+  issuer?: string;
+  authorizationEndpoint?: string;
+  tokenEndpoint?: string;
+  registrationEndpoint?: string;
+  registeredClientId?: string;
+  registeredClientSecret?: string;
+  redirectUri?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: number;
+}
+
+export interface MCPStdioConfig {
+  command: string;
+  /** Argumentos separados por espacios (se respetan comillas) */
+  args: string;
+  /** Variables de entorno, una por línea: CLAVE=valor */
+  env: string;
+  cwd?: string;
+}
+
 export interface MCPServer {
   id: string;
   name?: string;              // Alias opcional elegido por el usuario
   url: string;
   transport: MCPTransport;
+  stdio?: MCPStdioConfig;
   authType: MCPAuthType;
   authToken: string;
   authHeader?: string;        // Header para api-key (default: Authorization: Bearer)
+  oauth?: MCPOAuthState;
+  headers?: { name: string; value: string }[];   // Headers extra en cada petición
   status: 'idle' | 'loading' | 'connected' | 'error';
   errorMessage: string;
   tools: MCPTool[];
   enabledTools: string[];
+  resources?: MCPResource[];
+  resourceTemplates?: MCPResourceTemplate[];
+  prompts?: MCPPrompt[];
   autoApprove?: boolean;      // Ejecutar herramientas sin pedir confirmación
   useProxy?: boolean;         // Conectar a través de /api/mcp (evita CORS, ej. n8n Cloud)
   // Información obtenida en el handshake `initialize`
-  serverInfo?: { name: string; version?: string };
+  serverInfo?: { name: string; title?: string; version?: string };
   protocolVersion?: string;
-  resolvedTransport?: 'http-stream' | 'sse' | 'legacy-post';
+  resolvedTransport?: 'http-stream' | 'sse' | 'legacy-post' | 'stdio';
   instructions?: string;
+  capabilities?: Record<string, any>;
+  /** Era del protocolo detectada: 'modern' (2026-07-28, sin sesión) o 'legacy' (initialize) */
+  era?: 'modern' | 'legacy';
+  /** Pasos del último intento de conexión (para diagnosticar) */
+  connectionLog?: string[];
 }
 
 export type ThemeOption = 'ocean' | 'mint' | 'lavender' | 'coral' | 'amber' | 'rose' | 'teal' | 'slate';

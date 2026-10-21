@@ -29,7 +29,8 @@
  */
 
 import { AppSettings, Message, Provider, MCPTool, MCPServer, Attachment, ToolCall } from "../types";
-import { callServerTool, connectServer, getFriendlyMCPError, readSSE } from "./mcpClient";
+import { callServerTool, connectServer, getFriendlyMCPError, readSSE, MCPProgress } from "./mcpClient";
+import { validateArgs } from "./jsonSchema";
 import { bridgeHeaders, CHATGPT_BRIDGE_PATH } from "./bridge";
 import { ensureFreshChatGPTToken } from "./chatgptAuth";
 
@@ -89,6 +90,12 @@ const FALLBACK_MODELS: Partial<Record<Provider, string[]>> = {
 
 /** Proveedores que aceptan PDFs de forma nativa en el chat */
 const PDF_NATIVE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt'];
+
+/**
+ * Proveedores con visión: a ellos se les reenvían las imágenes que devuelven
+ * las herramientas MCP (a los demás, sólo el texto, o la API rechazaría el turno).
+ */
+const VISION_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt', 'xai'];
 
 /** Máximo de rondas LLM <-> herramientas por mensaje del usuario */
 const MAX_TOOL_TURNS = 8;
@@ -261,6 +268,22 @@ const buildUserContent = (text: string, attachments: Attachment[] | undefined, p
 };
 
 /**
+ * EDUCATIVO: el rol `tool` sólo admite texto en casi todas las APIs. Para que
+ * el modelo VEA una imagen devuelta por una herramienta (una captura, un
+ * gráfico…), se la mandamos a continuación como un mensaje de usuario.
+ */
+const toolImagesMessage = (images: Attachment[], provider: Provider) => {
+    if (!images.length || !VISION_PROVIDERS.includes(provider)) return null;
+    return {
+        role: 'user',
+        content: [
+            { type: 'text', text: `[Imágenes devueltas por las herramientas (${images.length})]` },
+            ...images.map(img => ({ type: 'image_url', image_url: { url: img.data } }))
+        ]
+    };
+};
+
+/**
  * Convierte el historial de la app a mensajes de API.
  * Además "repara" historiales inconsistentes: si un assistant pidió tools
  * pero falta alguna respuesta (p. ej. el usuario canceló), agregamos una
@@ -282,16 +305,20 @@ const toApiMessages = (history: Message[], provider: Provider): any[] => {
 
                 // Recolectar las respuestas que siguen
                 const answered = new Set<string>();
+                const toolImages: Attachment[] = [];
                 while (history[i + 1]?.role === 'tool') {
                     const t = history[++i];
                     answered.add(t.tool_call_id || '');
                     out.push({ role: 'tool', tool_call_id: t.tool_call_id, name: t.name, content: t.content || '' });
+                    toolImages.push(...(t.attachments || []).filter(a => a.type.startsWith('image/')));
                 }
                 m.toolCalls.forEach(tc => {
                     if (!answered.has(tc.id)) {
                         out.push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: 'Ejecución interrumpida (sin resultado).' });
                     }
                 });
+                const imgMsg = toolImagesMessage(toolImages, provider);
+                if (imgMsg) out.push(imgMsg);
             } else if (msg.content) {
                 out.push(msg);
             }
@@ -687,6 +714,48 @@ const callChatGPT = async (
     };
 };
 
+/** API key y modelo del proveedor activo (con modelos por defecto razonables). */
+export const resolveProvider = (settings: AppSettings): { key: string; model: string } => {
+    const map: Record<Provider, { key: string; model: string }> = {
+        groq: { key: settings.groqKey, model: settings.groqModel || 'llama-3.1-8b-instant' },
+        openrouter: { key: settings.openRouterKey, model: settings.openRouterModel || 'openai/gpt-4o-mini' },
+        openai: { key: settings.openaiKey, model: settings.openaiModel || 'gpt-4o-mini' },
+        cerebras: { key: settings.cerebrasKey, model: settings.cerebrasModel || 'llama3.1-8b' },
+        gemini: { key: settings.geminiKey, model: settings.geminiModel || 'gemini-2.5-flash' },
+        xai: { key: settings.xaiKey, model: settings.xaiModel || 'grok-3-mini' },
+        custom1: { key: settings.custom1Key, model: settings.custom1Model },
+        custom2: { key: settings.custom2Key, model: settings.custom2Model },
+        chatgpt: { key: settings.chatgptKey, model: settings.chatgptModel || 'gpt-5' }
+    };
+
+    return map[settings.activeProvider];
+};
+
+/**
+ * Una sola respuesta del modelo activo, sin herramientas.
+ * La usa el "sampling" de MCP: un servidor le pide a NUESTRO modelo que genere
+ * texto (por ejemplo, para resumir algo dentro de una herramienta).
+ */
+export const completeOnce = async (
+    settings: AppSettings,
+    messages: { role: 'user' | 'assistant'; content: any }[],
+    options: { systemPrompt?: string; signal?: AbortSignal; onSettingsPatch?: (p: Partial<AppSettings>) => void } = {}
+): Promise<{ text: string; model: string }> => {
+    const { key, model } = resolveProvider(settings);
+    if (!key) throw new Error('No hay un proveedor de IA conectado.');
+    const apiMessages = [
+        ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
+        ...messages
+    ];
+    if (settings.activeProvider === 'chatgpt') {
+        const { parsed } = await callChatGPT(model, apiMessages, [], settings, { signal: options.signal, onSettingsPatch: options.onSettingsPatch });
+        return { text: parsed.content, model };
+    }
+    const { data } = await callLLMProvider(settings.activeProvider, key, model, apiMessages, [], settings, options.signal);
+    const parsed = settings.activeProvider === 'gemini' ? parseGeminiResponse(data) : parseOpenAIResponse(data);
+    return { text: parsed.content, model };
+};
+
 // ============================================================================
 // MAIN MESSAGE FLOW
 // ============================================================================
@@ -710,6 +779,8 @@ export interface SendMessageOptions {
     onSettingsPatch?: (patch: Partial<AppSettings>) => void;
     /** Identificador estable de la conversación (cache de prompts en ChatGPT). */
     sessionId?: string;
+    /** Avisos de progreso de una herramienta en curso (si el servidor los manda). */
+    onToolProgress?: (toolName: string, progress: MCPProgress | null) => void;
 }
 
 /**
@@ -734,20 +805,7 @@ export const sendMessage = async (
     const { onToolApproval, onUpdate, signal } = options;
     const { activeProvider } = settings;
 
-    // Mapeo de keys y modelos por proveedor
-    const providerKeyMap: Record<Provider, { key: string; model: string }> = {
-        groq: { key: settings.groqKey, model: settings.groqModel || 'llama-3.1-8b-instant' },
-        openrouter: { key: settings.openRouterKey, model: settings.openRouterModel || 'openai/gpt-4o-mini' },
-        openai: { key: settings.openaiKey, model: settings.openaiModel || 'gpt-4o-mini' },
-        cerebras: { key: settings.cerebrasKey, model: settings.cerebrasModel || 'llama3.1-8b' },
-        gemini: { key: settings.geminiKey, model: settings.geminiModel || 'gemini-2.5-flash' },
-        xai: { key: settings.xaiKey, model: settings.xaiModel || 'grok-3-mini' },
-        custom1: { key: settings.custom1Key, model: settings.custom1Model },
-        custom2: { key: settings.custom2Key, model: settings.custom2Model },
-        chatgpt: { key: settings.chatgptKey, model: settings.chatgptModel || 'gpt-5' }
-    };
-
-    const { key, model } = providerKeyMap[activeProvider];
+    const { key, model } = resolveProvider(settings);
 
     if (!key) throw new Error(`La API Key para ${activeProvider} no está configurada.`);
 
@@ -834,12 +892,14 @@ export const sendMessage = async (
             rawDebug
         });
 
+        const turnImages: Attachment[] = [];
         for (const toolCall of parsed.toolCalls) {
             const fnName = toolCall.function.name;
             const binding = bindings[fnName];
 
             let args: any = {};
             let argsError = false;
+            let validation: ReturnType<typeof validateArgs> | undefined;
             try {
                 args = toolCall.function.arguments ? JSON.parse(toolCall.function.arguments) : {};
             } catch {
@@ -858,7 +918,12 @@ export const sendMessage = async (
             } else if (argsError) {
                 resultText = `Error: los argumentos no son JSON válido: ${toolCall.function.arguments}`;
                 isError = true;
+            } else if ((validation = validateArgs(binding.tool.inputSchema, args)).errors.length) {
+                // Se le devuelve el error al modelo para que corrija y reintente
+                resultText = `Error: argumentos inválidos para "${binding.originalName}": ${validation.errors.join('; ')}. Corrígelos y vuelve a intentar.`;
+                isError = true;
             } else {
+                args = validation.value;
                 const serverName = binding.server.name || binding.server.serverInfo?.name || binding.server.url;
                 const approved = binding.server.autoApprove || await onToolApproval({
                     toolName: fnName,
@@ -873,14 +938,17 @@ export const sendMessage = async (
 
                 if (approved) {
                     try {
-                        const r = await callServerTool(binding.server, binding.originalName, args, signal);
+                        const r = await callServerTool(binding.server, binding.originalName, args, signal,
+                            p => options.onToolProgress?.(binding.originalName, p));
                         resultText = r.text || '(sin contenido)';
-                        images = r.images;
+                        images = r.attachments;
                         isError = r.isError;
                     } catch (err: any) {
                         if (err?.name === 'AbortError') throw err;
-                        resultText = `Error ejecutando la herramienta: ${err.message}`;
+                        resultText = `Error ejecutando la herramienta: ${getFriendlyMCPError(err)}`;
                         isError = true;
+                    } finally {
+                        options.onToolProgress?.(binding.originalName, null);
                     }
                 } else {
                     resultText = "El usuario rechazó la ejecución de esta herramienta.";
@@ -889,6 +957,7 @@ export const sendMessage = async (
             }
 
             apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, name: fnName, content: resultText });
+            turnImages.push(...images.filter(a => a.type.startsWith('image/')));
             emit({
                 id: uid(),
                 role: 'tool',
@@ -907,6 +976,8 @@ export const sendMessage = async (
                 }
             });
         }
+        const imgMsg = toolImagesMessage(turnImages, activeProvider);
+        if (imgMsg) apiMessages.push(imgMsg);
     }
 
     // Límite de seguridad alcanzado

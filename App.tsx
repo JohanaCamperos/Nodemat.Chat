@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Send, Menu, X, Plus, MessageSquare, Trash2, RefreshCw, Copy, Check, Square, Paperclip, ChevronDown, Upload, Key, Server, Wrench, VenetianMask, EyeOff, FileCode } from 'lucide-react';
-import { Share2, FileText, FileJson, Sparkles } from 'lucide-react';
+import { Share2, FileText, FileJson, Sparkles, BookOpen } from 'lucide-react';
 import { storageService } from './services/storageService';
-import { sendMessage, fetchModels, ToolApprovalRequest } from './services/llmService';
-import { connectServer, disconnectServer, getFriendlyMCPError } from './services/mcpClient';
+import { sendMessage, fetchModels, completeOnce, ToolApprovalRequest } from './services/llmService';
+import { connectServer, disconnectServer, getFriendlyMCPError, refreshServerLists, setMCPHooks, MCPProgress } from './services/mcpClient';
+import { authorizeServer, openAuthPopup } from './services/mcpOAuth';
+import { MCPServerRequestModal, PendingServerRequest } from './components/MCPServerRequestModal';
+import { MCPLibraryModal } from './components/MCPLibraryModal';
 import { setBridgeToken } from './services/bridge';
 import { fileToAttachment, formatBytes, ACCEPT_ATTRIBUTE, exportSessionJSON, exportSessionMarkdown, shareSession, shareText, copyText, shareOutcomeLabel, importSessionsFromFile, sessionToMarkdown } from './services/fileService';
 import { GeneratedImage } from './services/imageGenService';
@@ -40,7 +43,12 @@ export default function App() {
                     mcpRegistryUrl: parsed.mcpRegistryUrl || DEFAULT_SETTINGS.mcpRegistryUrl,
                     // Un servidor que quedó "loading" al recargar nunca terminaría de conectar
                     mcpServers: Array.isArray(parsed.mcpServers)
-                        ? parsed.mcpServers.map((s: MCPServer) => s.status === 'loading' ? { ...s, status: 'idle' } : s)
+                        ? parsed.mcpServers.map((s: MCPServer) => ({
+                            ...s,
+                            status: s.status === 'loading' ? 'idle' : s.status,
+                            // Antes "oauth" era un token pegado a mano: ahora eso es "bearer"
+                            authType: s.authType === 'oauth' && !s.oauth ? 'bearer' : s.authType
+                        }))
                         : []
                 };
             } catch (e) {
@@ -151,6 +159,58 @@ export default function App() {
     const [pendingTool, setPendingTool] = useState<(ToolApprovalRequest & { resolve: (v: boolean) => void }) | null>(null);
     const autoApprovedTools = useRef<Set<string>>(new Set());   // "Permitir siempre" (hasta recargar)
     const abortRef = useRef<AbortController | null>(null);
+    const mcpConnecting = useRef(new Map<string, AbortController>());
+    const listRefreshTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+    const settingsRef = useRef(settings);
+    settingsRef.current = settings;
+    const [serverRequest, setServerRequest] = useState<PendingServerRequest | null>(null);
+    const [isMCPLibraryOpen, setIsMCPLibraryOpen] = useState(false);
+    const [toolProgress, setToolProgress] = useState<{ tool: string; progress: MCPProgress } | null>(null);
+
+    // Lo que los servidores MCP pueden pedirle o avisarle a la app
+    useEffect(() => {
+        setMCPHooks({
+            onServerUpdate: (id, patch) => setSettings(s => ({ ...s, mcpServers: s.mcpServers.map(x => x.id === id ? { ...x, ...patch } : x) })),
+            onServerRequest: (server, method, params) =>
+                new Promise((resolve, reject) => setServerRequest({ server, method, params, resolve, reject })),
+            onNotification: (server, method) => {
+                if (!/^notifications\/(tools|resources|prompts)\/list_changed$/.test(method)) return;
+                // Los avisos suelen venir en ráfaga: se agrupan y se recarga una sola vez
+                clearTimeout(listRefreshTimers.current.get(server.id));
+                listRefreshTimers.current.set(server.id, setTimeout(() => refreshServerLists(server).then(lists => lists && setSettings(s => ({
+                    ...s,
+                    mcpServers: s.mcpServers.map(x => {
+                        if (x.id !== server.id) return x;
+                        const names = lists.tools.map(t => t.name);
+                        const known = x.tools.map(t => t.name);
+                        // Las herramientas nuevas quedan activadas; las que desaparecen, fuera
+                        return { ...x, ...lists, enabledTools: [...x.enabledTools.filter(n => names.includes(n)), ...names.filter(n => !known.includes(n))] };
+                    })
+                }))).catch(() => { }), 800));
+            }
+        });
+    }, []);
+
+    /** sampling/createMessage: el servidor pide una respuesta de NUESTRO modelo. */
+    const runSampling = async (params: any) => {
+        const toParts = (c: any): any[] => c?.type === 'image'
+            ? [{ type: 'image_url', image_url: { url: `data:${c.mimeType};base64,${c.data}` } }]
+            : c?.type === 'text' ? [{ type: 'text', text: c.text }] : [];
+        const messages = (params?.messages || []).map((m: any) => {
+            const parts = (Array.isArray(m.content) ? m.content : [m.content]).flatMap(toParts);
+            const onlyText = parts.every((p: any) => p.type === 'text');
+            return {
+                role: m.role === 'assistant' ? 'assistant' as const : 'user' as const,
+                content: onlyText ? parts.map((p: any) => p.text).join('\n') : parts
+            };
+        });
+        const current = settingsRef.current;
+        const { text, model } = await completeOnce(current, messages, {
+            systemPrompt: params?.systemPrompt,
+            onSettingsPatch: (patch) => setSettings(s => ({ ...s, ...patch }))
+        });
+        return { role: 'assistant', content: { type: 'text', text }, model: `${current.activeProvider}/${model}`, stopReason: 'endTurn' };
+    };
 
     // Sharing / drag & drop
     const [isDragging, setIsDragging] = useState(false);
@@ -174,6 +234,7 @@ export default function App() {
 
     // --- Derived State ---
     const currentSession = sessions.find(s => s.id === currentSessionId) || sessions[0];
+    const hasMCPLibrary = settings.mcpServers.some(s => s.status === 'connected' && ((s.prompts?.length || 0) + (s.resources?.length || 0) + (s.resourceTemplates?.length || 0)) > 0);
 
     // --- Effects ---
 
@@ -470,18 +531,34 @@ export default function App() {
         setSettings(s => ({ ...s, mcpServers: s.mcpServers.filter(srv => srv.id !== serverId) }));
     };
 
-    const connectMCPServer = async (serverId: string) => {
-        setSettings(s => ({
-            ...s,
-            mcpServers: s.mcpServers.map(srv => srv.id === serverId ? { ...srv, status: 'loading', errorMessage: '' } : srv)
-        }));
+    const updateMCPServer = (serverId: string, patch: Partial<MCPServer>) =>
+        setSettings(s => ({ ...s, mcpServers: s.mcpServers.map(srv => srv.id === serverId ? { ...srv, ...patch } : srv) }));
 
-        const server = settings.mcpServers.find(s => s.id === serverId);
-        if (!server) return;
+    /**
+     * Conecta un servidor MCP. Con `authorize`, antes corre el flujo OAuth: la
+     * ventana se abre ACÁ, sin ningún await antes, o el navegador la bloquea.
+     */
+    const connectMCPServer = async (serverId: string, opts: { authorize?: boolean } = {}) => {
+        const popup = opts.authorize ? openAuthPopup() : null;
+        const server = settingsRef.current.mcpServers.find(s => s.id === serverId);
+        if (!server) { popup?.close(); return; }
 
+        const controller = new AbortController();
+        mcpConnecting.current.get(serverId)?.abort();
+        mcpConnecting.current.set(serverId, controller);
+        const logLines: string[] = [];
+        const log = (line: string) => { logLines.push(line); updateMCPServer(serverId, { connectionLog: [...logLines] }); };
+        updateMCPServer(serverId, { status: 'loading', errorMessage: '', connectionLog: [] });
+
+        let target: MCPServer = { ...server, url: server.url.trim() };
         try {
-            // Handshake completo: initialize -> notifications/initialized -> tools/list
-            const res = await connectServer({ ...server, url: server.url.trim() });
+            if (opts.authorize) {
+                const oauth = await authorizeServer(target, popup, {}, log, controller.signal);
+                target = { ...target, oauth };
+                updateMCPServer(serverId, { oauth });
+            }
+            // Handshake completo: initialize -> notifications/initialized -> tools/list (+ recursos y prompts)
+            const res = await connectServer(target, controller.signal, log);
             const toolNames = res.tools.map(t => t.name);
             setSettings(s => ({
                 ...s,
@@ -489,10 +566,15 @@ export default function App() {
                     ...srv,
                     status: 'connected',
                     tools: res.tools,
+                    resources: res.resources,
+                    resourceTemplates: res.resourceTemplates,
+                    prompts: res.prompts,
                     serverInfo: res.serverInfo,
                     protocolVersion: res.protocolVersion,
                     resolvedTransport: res.resolvedTransport,
+                    era: res.era,
                     instructions: res.instructions,
+                    capabilities: res.capabilities,
                     // Conservar la selección previa si las herramientas siguen existiendo
                     enabledTools: srv.enabledTools.filter(n => toolNames.includes(n)).length > 0
                         ? srv.enabledTools.filter(n => toolNames.includes(n))
@@ -500,15 +582,20 @@ export default function App() {
                 } : srv)
             }));
         } catch (e: any) {
-            setSettings(s => ({
-                ...s,
-                mcpServers: s.mcpServers.map(srv => srv.id === serverId ? {
-                    ...srv,
-                    status: 'error',
-                    errorMessage: getFriendlyMCPError(e)
-                } : srv)
-            }));
+            if (controller.signal.aborted) {
+                updateMCPServer(serverId, { status: 'idle' });
+                return;
+            }
+            updateMCPServer(serverId, { status: 'error', errorMessage: getFriendlyMCPError(e) });
+        } finally {
+            if (mcpConnecting.current.get(serverId) === controller) mcpConnecting.current.delete(serverId);
         }
+    };
+
+    const cancelMCPServer = (serverId: string) => {
+        mcpConnecting.current.get(serverId)?.abort();
+        disconnectServer(serverId);
+        updateMCPServer(serverId, { status: 'idle' });
     };
 
     const disconnectMCPServer = (serverId: string) => {
@@ -653,7 +740,8 @@ export default function App() {
                 onUpdate: (msgs) => { partial = msgs; showMessages(msgs); },
                 onSettingsPatch: (patch) => setSettings(s => ({ ...s, ...patch })),
                 sessionId,
-                signal: controller.signal
+                signal: controller.signal,
+                onToolProgress: (tool, progress) => setToolProgress(progress ? { tool, progress } : null)
             });
             showMessages(newMessages);
         } catch (error: any) {
@@ -668,6 +756,7 @@ export default function App() {
         } finally {
             abortRef.current = null;
             setIsLoading(false);
+            setToolProgress(null);
         }
     };
 
@@ -771,6 +860,18 @@ export default function App() {
                 prompt={settings.systemPrompt}
                 onChange={(val: string) => setSettings((s: AppSettings) => ({ ...s, systemPrompt: val }))}
             />
+            <MCPServerRequestModal request={serverRequest} runSampling={runSampling} onDone={() => setServerRequest(null)} />
+
+            <MCPLibraryModal
+                isOpen={isMCPLibraryOpen}
+                onClose={() => setIsMCPLibraryOpen(false)}
+                servers={settings.mcpServers}
+                onInsert={(text, atts) => {
+                    if (text) setInput(prev => prev ? `${prev}\n\n${text}` : text);
+                    if (atts.length) setAttachments(prev => [...prev, ...atts]);
+                }}
+            />
+
             <SettingsModal
                 isOpen={isSettingsOpen}
                 onClose={() => setIsSettingsOpen(false)}
@@ -785,6 +886,8 @@ export default function App() {
                 connectMCPServer={connectMCPServer}
                 disconnectMCPServer={disconnectMCPServer}
                 toggleMCPTool={toggleMCPTool}
+                updateMCPServer={updateMCPServer}
+                cancelMCPServer={cancelMCPServer}
                 openModelsManager={(provider: Provider) => { setModelsManagerProvider(provider); setShowModelsManager(true); }}
             />
 
@@ -1125,7 +1228,9 @@ export default function App() {
                     {isLoading && (
                         <div className="flex justify-start animate-pulse">
                             <div className="bg-surface p-4 rounded-2xl rounded-bl-none text-text-muted text-sm border border-border">
-                                {pendingTool ? `Esperando tu aprobación para ${pendingTool.originalName}…` : 'Escribiendo...'}
+                                {pendingTool ? `Esperando tu aprobación para ${pendingTool.originalName}…`
+                                    : toolProgress ? `Ejecutando ${toolProgress.tool}… ${toolProgress.progress.total ? `${Math.round(100 * toolProgress.progress.progress / toolProgress.progress.total)}% ` : ''}${toolProgress.progress.message || ''}`
+                                        : 'Escribiendo...'}
                             </div>
                         </div>
                     )}
@@ -1190,6 +1295,17 @@ export default function App() {
                                     id="hidden-file-input"
                                 />
                             </div>
+
+                            {hasMCPLibrary && (
+                                <button
+                                    onClick={() => setIsMCPLibraryOpen(true)}
+                                    className="p-2 text-text-muted hover:text-text-main hover:bg-surface-highlight rounded-full transition-colors"
+                                    title="Prompts y recursos de tus servidores MCP"
+                                    aria-label="Prompts y recursos MCP"
+                                >
+                                    <BookOpen size={20} />
+                                </button>
+                            )}
 
                             <textarea
                                 value={input}
