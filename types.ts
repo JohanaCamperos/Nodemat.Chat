@@ -268,6 +268,14 @@ export interface AppSettings {
 
   // General
   incognitoMode: boolean;
+
+  /** Generación de imágenes desde el chat: el modelo puede llamar a la herramienta interna */
+  imageTool?: {
+    enabled: boolean;
+    provider: Provider;
+    model: string;
+    autoApprove?: boolean;
+  };
 }
 
 // Helper to get provider display name

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Image as ImageIcon, Download, Terminal, Loader2, Sparkles, ChevronDown, RefreshCw, Share2, MessageSquarePlus, Paperclip, Upload, StopCircle, Wand2 } from 'lucide-react';
+import { X, Image as ImageIcon, Download, Terminal, Loader2, Sparkles, ChevronDown, RefreshCw, Share2, MessageSquarePlus, Paperclip, Upload, StopCircle, Wand2, Brush } from 'lucide-react';
+import { MaskEditor, MaskResult } from './MaskEditor';
 import { imageGenService, fetchImageModels, IMAGE_PROVIDERS, AspectRatio, GeneratedImage } from '../services/imageGenService';
 import { downloadImage, fileToAttachment, shareImage, shareOutcomeLabel } from '../services/fileService';
 import { Provider, AppSettings, PROVIDER_NAMES, Attachment } from '../types';
@@ -12,6 +13,10 @@ interface ImageGenModalProps {
     onInsertInChat?: (images: GeneratedImage[], prompt: string, meta: { provider: Provider; model: string; logs: any }) => void;
     /** Agrega las imágenes como adjuntos del próximo mensaje (para que un LLM con visión las analice) */
     onAttach?: (attachments: Attachment[]) => void;
+    /** Imagen con la que abrir el generador (botón "Editar" del chat o la galería) */
+    initialReference?: string | null;
+    /** Para guardar qué modelo usa el chat cuando le piden una imagen */
+    onSettingsChange?: (patch: Partial<AppSettings>) => void;
 }
 
 // La cuenta de ChatGPT no tiene acceso a las APIs de imágenes: no figura en IMAGE_PROVIDERS
@@ -24,7 +29,7 @@ const ASPECTS: AspectRatio[] = ['1:1', '16:9', '9:16', '4:3', '3:4'];
 
 interface HistoryItem { id: string; prompt: string; provider: Provider; model: string; images: GeneratedImage[]; }
 
-export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, settings, onInsertInChat, onAttach }) => {
+export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, settings, onInsertInChat, onAttach, initialReference, onSettingsChange }) => {
     const [provider, setProvider] = useState<Provider>('openrouter');
     const [models, setModels] = useState<string[]>([]);
     const [model, setModel] = useState('');
@@ -41,6 +46,8 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
     const [toast, setToast] = useState('');
     const abortRef = useRef<AbortController | null>(null);
     const refInput = useRef<HTMLInputElement>(null);
+    const [mask, setMask] = useState<MaskResult | null>(null);
+    const [maskEditing, setMaskEditing] = useState(false);
 
     const keyFor = (p: Provider) => { const k = KEY_MAP[p]; return k ? (settings[k] as string) || '' : ''; };
     const customUrlFor = (p: Provider) => p === 'custom1' ? settings.custom1Url : p === 'custom2' ? settings.custom2Url : undefined;
@@ -51,12 +58,22 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
 
     const flash = (msg: string) => { setToast(msg); setTimeout(() => setToast(''), 2200); };
 
-    // Al abrir: elegir un proveedor con key configurada
+    // Al abrir: elegir un proveedor con key configurada (el del chat, si hay uno elegido)
     useEffect(() => {
-        if (isOpen && !keyFor(provider) && availableProviders.length > 0) {
-            setProvider(availableProviders[0]);
-        }
+        if (!isOpen) return;
+        const preferred = settings.imageTool?.provider;
+        if (preferred && keyFor(preferred) && provider !== preferred) setProvider(preferred);
+        else if (!keyFor(provider) && availableProviders.length > 0) setProvider(availableProviders[0]);
     }, [isOpen]);
+
+    // Abierto desde "Editar": la imagen queda como referencia
+    useEffect(() => {
+        if (isOpen && initialReference) {
+            setReferences([initialReference]);
+            setMask(null);
+            setResult({ images: [], logs: null, error: null });
+        }
+    }, [isOpen, initialReference]);
 
     // Cargar modelos de imagen cuando cambia el proveedor
     useEffect(() => {
@@ -70,7 +87,8 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
             .then(list => {
                 if (cancelled) return;
                 setModels(list);
-                setModel(m => list.includes(m) ? m : (list[0] || ''));
+                const preferred = settings.imageTool?.provider === provider ? settings.imageTool.model : '';
+                setModel(m => list.includes(m) ? m : (preferred || list[0] || ''));
             })
             .finally(() => !cancelled && setIsLoadingModels(false));
         return () => { cancelled = true; };
@@ -94,13 +112,22 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
         setIsLoading(true);
         setResult({ images: [], logs: null, error: null });
 
+        // Con zona marcada: OpenAI usa la máscara; el resto recibe la imagen marcada y una instrucción
+        const useMask = !!mask && supportsReferences && references.length > 0;
+        const openAIMask = useMask && provider === 'openai';
+        const finalPrompt = useMask && !openAIMask
+            ? `${prompt}\n\n(Modifica SOLO la zona pintada de magenta en la segunda imagen; todo lo demás debe quedar idéntico a la primera imagen.)`
+            : prompt;
+        const refs = !supportsReferences ? [] : useMask && !openAIMask ? [references[0], mask!.overlay, ...references.slice(1)].slice(0, 4) : references;
+
         try {
             const response = await imageGenService.generateImage({
-                prompt, model, provider, apiKey: currentKey,
+                prompt: finalPrompt, model, provider, apiKey: currentKey,
                 aspectRatio: aspect,
                 n: Math.min(count, maxCount),
                 quality,
-                referenceImages: supportsReferences ? references : [],
+                referenceImages: refs,
+                mask: openAIMask ? mask!.mask : undefined,
                 customUrl: customUrlFor(provider),
                 signal: abortRef.current.signal
             });
@@ -153,6 +180,10 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
                     </button>
                 </div>
 
+                {maskEditing && references[0] && (
+                    <MaskEditor image={references[0]} onCancel={() => setMaskEditing(false)} onDone={(m) => { setMask(m); setMaskEditing(false); }} />
+                )}
+
                 <div className="flex-1 overflow-y-auto p-4 md:p-6 md:flex gap-6">
 
                     {/* Left: Controls */}
@@ -189,6 +220,17 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
                                             {models.map(m => <option key={m} value={m} />)}
                                         </datalist>
                                         <p className="text-[10px] text-text-muted mt-1">{models.length} modelos de imagen disponibles</p>
+                                        {onSettingsChange && model && currentKey && (
+                                            <label className="flex items-start gap-2 mt-2 text-xs text-text-muted cursor-pointer select-none">
+                                                <input
+                                                    type="checkbox"
+                                                    className="mt-0.5"
+                                                    checked={!!settings.imageTool?.enabled && settings.imageTool.provider === provider && settings.imageTool.model === model}
+                                                    onChange={e => onSettingsChange({ imageTool: { ...settings.imageTool, enabled: e.target.checked, provider, model } })}
+                                                />
+                                                <span>Usar este modelo cuando le pidas una imagen <strong>al chat</strong> (el modelo del chat podrá generarlas solo, con tu aprobación).</span>
+                                            </label>
+                                        )}
                                     </>
                                 )}
                             </div>
@@ -250,7 +292,7 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
                                     {references.map((r, i) => (
                                         <div key={i} className="relative">
                                             <img src={r} className="h-14 w-14 object-cover rounded-lg border border-border" />
-                                            <button onClick={() => setReferences(refs => refs.filter((_, j) => j !== i))}
+                                            <button onClick={() => { setReferences(refs => refs.filter((_, j) => j !== i)); if (i === 0) setMask(null); }}
                                                 className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5"><X size={10} /></button>
                                         </div>
                                     ))}
@@ -264,6 +306,16 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
                                     <input ref={refInput} type="file" accept="image/*" multiple className="hidden"
                                         onChange={e => { handleReferenceFiles(e.target.files); e.target.value = ''; }} />
                                 </div>
+                                {references.length > 0 && (
+                                    <div className="flex items-center gap-2 mt-2 text-xs">
+                                        <button onClick={() => setMaskEditing(true)}
+                                            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border text-text-main hover:bg-surface-highlight">
+                                            <Brush size={14} /> {mask ? 'Cambiar zona marcada' : 'Marcar la zona a cambiar'}
+                                        </button>
+                                        {mask && <button onClick={() => setMask(null)} className="text-red-500 hover:underline">Quitar zona</button>}
+                                    </div>
+                                )}
+                                {mask && <p className="text-[10px] text-green-600 mt-1">✓ Sólo se modificará la zona pintada{provider === 'openai' ? ' (máscara de OpenAI)' : ' (se le indica al modelo)'}.</p>}
                                 <p className="text-[10px] text-text-muted mt-1">Para editar una imagen o mantener un estilo. También puedes pegarla en el prompt.</p>
                             </div>
                         )}

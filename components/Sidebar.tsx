@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, LogOut, MessageSquare, Moon, Plus, Settings, Shield, ShieldOff, Sparkles, Sun, Terminal, Trash2, X } from 'lucide-react';
+import { Images, AlertTriangle, LogOut, MessageSquare, Moon, Plus, Settings, Shield, ShieldOff, Sparkles, Sun, Terminal, Trash2, X } from 'lucide-react';
 import { Tooltip } from './Tooltip';
 import { storageService } from '../services/storageService';
 import { ThemeOption } from '../types';
@@ -7,7 +7,7 @@ import { THEMES, LOGIN_REQUIRED } from '../config/defaults';
 
 export const Sidebar: React.FC<any> = ({
     isOpen, onClose, sessions, currentSessionId, setCurrentSessionId, handleNewChat, handleDeleteChat,
-    settings, setSettings, setIsSettingsOpen, setIsManageModalOpen, setIsImageModalOpen, onLogout
+    settings, setSettings, setIsSettingsOpen, setIsManageModalOpen, setIsImageModalOpen, setIsGalleryOpen, onLogout
 }) => (
     <>
         {isOpen && (
@@ -38,13 +38,22 @@ export const Sidebar: React.FC<any> = ({
                     <Plus size={18} />
                     Nuevo Chat
                 </button>
-                <button
-                    onClick={() => { setIsImageModalOpen(true); onClose(); }}
-                    className="w-full mt-2 flex items-center justify-center gap-2 border border-border text-text-main hover:bg-surface-highlight p-3 rounded-xl transition-all font-medium text-sm"
-                >
-                    <Sparkles size={18} className="text-purple-500" />
-                    Generar Imágenes
-                </button>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                    <button
+                        onClick={() => { setIsImageModalOpen(true); onClose(); }}
+                        className="flex items-center justify-center gap-2 border border-border text-text-main hover:bg-surface-highlight p-3 rounded-xl transition-all font-medium text-sm"
+                    >
+                        <Sparkles size={18} className="text-purple-500" />
+                        Imágenes
+                    </button>
+                    <button
+                        onClick={() => { setIsGalleryOpen(true); onClose(); }}
+                        className="flex items-center justify-center gap-2 border border-border text-text-main hover:bg-surface-highlight p-3 rounded-xl transition-all font-medium text-sm"
+                    >
+                        <Images size={18} className="text-primary" />
+                        Galería
+                    </button>
+                </div>
 
             </div>
 

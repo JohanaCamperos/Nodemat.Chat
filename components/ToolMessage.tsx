@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { Wrench, ChevronDown, CheckCircle2, AlertCircle, Ban, Server } from 'lucide-react';
 import { Message } from '../types';
 import { ChatImage } from './ChatImage';
+import { AttachmentIcon } from './AttachmentIcon';
+import { downloadAttachment } from '../services/fileService';
 
 /**
  * Muestra las llamadas a herramientas MCP y sus resultados dentro del chat.
@@ -71,6 +73,16 @@ export const ToolResultCard: React.FC<{ message: Message; onDownload: (src: stri
             )}
             {message.attachments?.filter(a => a.type.startsWith('image/')).map((att, i) => (
                 <div key={i} className="px-3 pb-3"><ChatImage src={att.data} alt={att.name} onDownload={onDownload} /></div>
+            ))}
+            {/* Audio y archivos que devolvió la herramienta */}
+            {message.attachments?.filter(a => !a.type.startsWith('image/')).map((att, i) => (
+                <div key={`f${i}`} className="px-3 pb-3 flex flex-col gap-1.5">
+                    <button onClick={() => downloadAttachment(att)} className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-surface-highlight w-fit max-w-full" title="Descargar">
+                        <AttachmentIcon type={att.type} name={att.name} />
+                        <span className="truncate">{att.name}</span>
+                    </button>
+                    {att.type.startsWith('audio/') && <audio controls src={att.data} className="h-9 max-w-full" aria-label={`Reproducir ${att.name}`} />}
+                </div>
             ))}
         </div>
     );

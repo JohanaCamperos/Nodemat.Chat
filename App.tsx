@@ -26,6 +26,8 @@ import { ChatMessage } from './components/ChatMessage';
 import { Markdown } from './components/Markdown';
 import { AttachmentIcon } from './components/AttachmentIcon';
 import { DictationButton } from './components/DictationButton';
+import { GalleryModal } from './components/GalleryModal';
+import { onImageEditRequest } from './services/imageBus';
 import { THEMES, DEFAULT_SETTINGS, INITIAL_SESSION, LOGIN_REQUIRED } from './config/defaults';
 
 // Safe Env Access (supports both REACT_APP_ and VITE_ prefixes)
@@ -172,6 +174,10 @@ export default function App() {
     /** Respuesta que el modelo está escribiendo (streaming) */
     const [streamText, setStreamText] = useState<string | null>(null);
     const [processingFiles, setProcessingFiles] = useState(0);
+    const [isGalleryOpen, setIsGalleryOpen] = useState(false);
+    /** Imagen con la que se abre el generador desde "Editar" */
+    const [imageEditSource, setImageEditSource] = useState<string | null>(null);
+    useEffect(() => onImageEditRequest((src) => { setImageEditSource(src); setIsImageModalOpen(true); }), []);
 
     // Lo que los servidores MCP pueden pedirle o avisarle a la app
     useEffect(() => {
@@ -865,6 +871,7 @@ export default function App() {
                 setIsSettingsOpen={setIsSettingsOpen}
                 setIsManageModalOpen={setIsManageModalOpen}
                 setIsImageModalOpen={setIsImageModalOpen}
+                setIsGalleryOpen={setIsGalleryOpen}
                 onLogout={handleLogout}
             />
 
@@ -919,10 +926,20 @@ export default function App() {
 
             <ImageGenModal
                 isOpen={isImageModalOpen}
-                onClose={() => setIsImageModalOpen(false)}
+                onClose={() => { setIsImageModalOpen(false); setImageEditSource(null); }}
                 settings={settings}
                 onInsertInChat={handleInsertGeneratedImages}
                 onAttach={(atts) => setAttachments(prev => [...prev, ...atts])}
+                initialReference={imageEditSource}
+                onSettingsChange={(patch) => setSettings(s => ({ ...s, ...patch }))}
+            />
+
+            <GalleryModal
+                isOpen={isGalleryOpen}
+                onClose={() => setIsGalleryOpen(false)}
+                sessions={sessions}
+                onOpenChat={(id) => setCurrentSessionId(id)}
+                onAttach={(att) => setAttachments(prev => [...prev, att])}
             />
 
 

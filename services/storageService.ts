@@ -22,7 +22,7 @@
  */
 
 import { get, set, del, keys, clear } from 'idb-keyval';
-import { ChatSession } from '../types';
+import { Attachment, ChatSession, Message } from '../types';
 
 // ============================================================================
 // CONSTANTS
@@ -46,6 +46,80 @@ const OLD_SESSION_KEY = 'nexus_sessions';
 const isChatKey = (key: string) => key.startsWith('nexus_chat_') && key !== INDEX_KEY;
 
 // ============================================================================
+// ARCHIVOS GRANDES COMO BLOB
+// ============================================================================
+
+/**
+ * EDUCATIVO: en memoria los adjuntos son data URLs (base64), que es lo que
+ * piden las APIs. Pero guardarlos así dentro de cada conversación tiene dos
+ * costos: base64 ocupa un 33 % más, y cada vez que cambia el chat se vuelve a
+ * escribir TODO (imágenes incluidas). Por eso los adjuntos grandes se guardan
+ * aparte, como Blob, con una clave que es el hash de su contenido: se escriben
+ * una sola vez aunque aparezcan en varios mensajes, y el chat guarda sólo
+ * la referencia `nmblob:<hash>`.
+ */
+const BLOB_PREFIX = 'nexus_blob_';
+const BLOB_REF = 'nmblob:';
+const MIN_EXTERNAL_CHARS = 32 * 1024;
+
+/** Hash ya calculado por adjunto (los objetos no cambian: el estado es inmutable) */
+const hashCache = new WeakMap<Attachment, string>();
+/** Blobs que ya sabemos que están guardados */
+const storedBlobs = new Set<string>();
+
+async function sha256(text: string) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function dataUrlToBlob(dataUrl: string): Blob {
+    const comma = dataUrl.indexOf(',');
+    const mime = dataUrl.slice(5, comma).split(';')[0] || 'application/octet-stream';
+    const bin = atob(dataUrl.slice(comma + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+}
+
+const blobToDataUrl = (blob: Blob) => new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+});
+
+async function externalize(att: Attachment): Promise<Attachment> {
+    if (!att.data?.startsWith('data:') || att.data.length < MIN_EXTERNAL_CHARS || !att.data.includes(';base64,')) return att;
+    let id = hashCache.get(att);
+    if (!id) {
+        id = await sha256(att.data);
+        hashCache.set(att, id);
+    }
+    if (!storedBlobs.has(id)) {
+        if (!(await get(BLOB_PREFIX + id))) await set(BLOB_PREFIX + id, dataUrlToBlob(att.data));
+        storedBlobs.add(id);
+    }
+    return { ...att, data: BLOB_REF + id };
+}
+
+async function hydrate(att: Attachment): Promise<Attachment> {
+    if (!att.data?.startsWith(BLOB_REF)) return att;
+    const id = att.data.slice(BLOB_REF.length);
+    const blob = await get<Blob>(BLOB_PREFIX + id);
+    if (!blob) return { ...att, data: '', extractedText: att.extractedText || '[El archivo ya no está guardado en este navegador]' };
+    const restored = { ...att, data: await blobToDataUrl(blob) };
+    hashCache.set(restored, id);
+    storedBlobs.add(id);
+    return restored;
+}
+
+const mapAttachments = async (session: ChatSession, fn: (a: Attachment) => Promise<Attachment>): Promise<ChatSession> => ({
+    ...session,
+    messages: await Promise.all(session.messages.map(async (m: Message) =>
+        m.attachments?.length ? { ...m, attachments: await Promise.all(m.attachments.map(fn)) } : m))
+});
+
+// ============================================================================
 // STORAGE SERVICE
 // ============================================================================
 
@@ -61,8 +135,8 @@ export const storageService = {
      * @param session - La sesión de chat a guardar
      */
     async saveSession(session: ChatSession): Promise<void> {
-        // Guardar la sesión completa en su propia key
-        await set(`nexus_chat_${session.id}`, session);
+        // Guardar la sesión en su propia key, con los adjuntos grandes como referencias a Blobs
+        await set(`nexus_chat_${session.id}`, await mapAttachments(session, externalize));
 
         // Actualizar el índice con los metadatos (id, título, fecha)
         await this.updateIndex(session);
@@ -84,7 +158,7 @@ export const storageService = {
             const promises = index.map(async (meta) => {
                 const session = await get<ChatSession>(`nexus_chat_${meta.id}`);
                 // Fallback a mensajes vacíos si el cuerpo no existe
-                return session || { ...meta, messages: [] };
+                return session ? mapAttachments(session, hydrate) : { ...meta, messages: [] };
             });
 
             const sessions = await Promise.all(promises);
@@ -104,6 +178,21 @@ export const storageService = {
     async deleteSession(sessionId: string): Promise<void> {
         await del(`nexus_chat_${sessionId}`);
         await this.removeFromIndex(sessionId);
+        await this.collectGarbage();
+    },
+
+    /** Borra los Blobs que ya no usa ninguna conversación. */
+    async collectGarbage(): Promise<void> {
+        const allKeys = (await keys()).filter((k): k is string => typeof k === 'string');
+        const used = new Set<string>();
+        for (const key of allKeys.filter(isChatKey)) {
+            const s = await get<ChatSession>(key);
+            s?.messages.forEach(m => m.attachments?.forEach(a => { if (a.data?.startsWith(BLOB_REF)) used.add(a.data.slice(BLOB_REF.length)); }));
+        }
+        for (const key of allKeys.filter(k => k.startsWith(BLOB_PREFIX))) {
+            const id = key.slice(BLOB_PREFIX.length);
+            if (!used.has(id)) { await del(key); storedBlobs.delete(id); }
+        }
     },
 
     /**

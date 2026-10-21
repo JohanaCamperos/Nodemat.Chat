@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, RefreshCw, Download, Share2, Maximize2, X } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Download, Share2, Maximize2, X, Wand2 } from 'lucide-react';
 import { shareImage, shareOutcomeLabel } from '../services/fileService';
+import { requestImageEdit } from '../services/imageBus';
 
 interface ChatImageProps {
     src?: string;
@@ -65,7 +66,12 @@ export const ChatImage: React.FC<ChatImageProps> = ({ src, alt, onDownload }) =>
                         <button onClick={(e) => { e.preventDefault(); setZoomed(true); }} className={btn} title="Ampliar">
                             <Maximize2 size={16} />
                         </button>
-                        <button onClick={handleShare} className={btn} title="Compartir / copiar">
+                        {src?.startsWith('data:') && (
+                            <button onClick={(e) => { e.preventDefault(); requestImageEdit(src); }} className={btn} title="Editar o crear variaciones" aria-label="Editar imagen">
+                                <Wand2 size={16} />
+                            </button>
+                        )}
+                        <button onClick={handleShare} className={btn} title="Compartir / copiar" aria-label="Compartir imagen">
                             <Share2 size={16} />
                         </button>
                         <button onClick={(e) => { e.preventDefault(); onDownload(src || ''); }} className={btn} title="Descargar imagen">

@@ -31,6 +31,7 @@
 import { AppSettings, Message, Provider, MCPTool, MCPServer, Attachment, ToolCall } from "../types";
 import { callServerTool, connectServer, getFriendlyMCPError, readSSE, MCPProgress } from "./mcpClient";
 import { validateArgs } from "./jsonSchema";
+import { imageCredentials, imageGenService, AspectRatio } from "./imageGenService";
 import { bridgeHeaders, CHATGPT_BRIDGE_PATH } from "./bridge";
 import { ensureFreshChatGPTToken } from "./chatgptAuth";
 
@@ -276,6 +277,69 @@ const buildUserContent = (text: string, attachments: Attachment[] | undefined, p
     });
     return parts;
 };
+
+// ============================================================================
+// HERRAMIENTA INTERNA: GENERAR IMÁGENES
+// ============================================================================
+
+/**
+ * EDUCATIVO: no todas las herramientas vienen de un servidor MCP. Nodemat le
+ * ofrece al modelo una propia, con la misma forma (nombre, descripción y JSON
+ * Schema), que llama al generador de imágenes configurado. Así cualquier
+ * modelo de chat, aunque no genere imágenes, puede "pedir" una.
+ */
+export const IMAGE_TOOL_NAME = 'nodemat_generar_imagen';
+
+const imageToolDefinition = (model: string) => ({
+    type: 'function',
+    function: {
+        name: IMAGE_TOOL_NAME,
+        description: `Genera o edita imágenes con el modelo ${model}. Úsala cuando el usuario pida una imagen, ilustración, logo, foto o dibujo. ` +
+            'El prompt debe ser detallado (sujeto, estilo, composición, luz, colores). Para editar una imagen existente, pasa su referencia nodemat://adjunto/… en "referencias".',
+        parameters: {
+            type: 'object',
+            properties: {
+                prompt: { type: 'string', description: 'Descripción detallada de la imagen a generar o del cambio a aplicar' },
+                formato: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4'], description: 'Proporción de la imagen (por defecto 1:1)' },
+                referencias: { type: 'array', items: { type: 'string' }, description: 'Referencias nodemat://adjunto/… de imágenes a editar o a usar como estilo' }
+            },
+            required: ['prompt']
+        }
+    }
+});
+
+async function runImageTool(args: any, settings: AppSettings, fileRefs: Map<string, Attachment>, signal?: AbortSignal) {
+    const cfg = settings.imageTool!;
+    const { apiKey, customUrl } = imageCredentials(settings, cfg.provider);
+    if (!apiKey) return { text: `Error: falta la API key de ${cfg.provider} para generar imágenes.`, images: [] as Attachment[], isError: true };
+    const references = (Array.isArray(args.referencias) ? args.referencias : [])
+        .map((r: string) => fileRefs.get(String(r).split('?')[0])?.data)
+        .filter((d: string | undefined): d is string => !!d && d.startsWith('data:image/'));
+    const res = await imageGenService.generateImage({
+        prompt: String(args.prompt || ''),
+        model: cfg.model,
+        provider: cfg.provider,
+        apiKey,
+        customUrl,
+        aspectRatio: (['1:1', '16:9', '9:16', '4:3', '3:4'].includes(args.formato) ? args.formato : '1:1') as AspectRatio,
+        referenceImages: references,
+        signal
+    });
+    if (res.error || !res.images.length) return { text: `Error generando la imagen: ${res.error || 'sin imágenes'}`, images: [] as Attachment[], isError: true };
+    const stamp = Date.now();
+    const images: Attachment[] = res.images.map((img, i) => ({
+        name: `imagen-${stamp}-${i + 1}.${img.mimeType.split('/')[1] || 'png'}`,
+        type: img.mimeType,
+        data: img.url
+    }));
+    return {
+        text: `Se generaron ${images.length} imagen(es) con ${cfg.model} y ya se muestran al usuario. ` +
+            `Referencias para editarlas después: ${images.map(i => FILE_REF_PREFIX + encodeURIComponent(i.name)).join(', ')}.` +
+            (res.revised_prompt ? ` Prompt revisado por el proveedor: ${res.revised_prompt}` : ''),
+        images,
+        isError: false
+    };
+}
 
 // ============================================================================
 // ARCHIVOS PARA LAS HERRAMIENTAS MCP
@@ -980,6 +1044,11 @@ export const sendMessage = async (
     const { bindings, defs: activeToolsDefs } = buildToolRegistry(settings.mcpServers);
 
     const fileRefs = buildFileRefs(history);
+
+    // Herramienta interna de imágenes (si el usuario eligió un modelo para el chat)
+    const imageTool = settings.imageTool?.enabled && imageCredentials(settings, settings.imageTool.provider).apiKey ? settings.imageTool : null;
+    if (imageTool) activeToolsDefs.push(imageToolDefinition(imageTool.model));
+
     if (activeToolsDefs.length > 0) {
         systemInstruction += "\n\nTienes acceso a herramientas externas (MCP). Úsalas cuando sea necesario.";
         if (fileRefs.size > 0) {
@@ -1085,7 +1154,28 @@ export const sendMessage = async (
             let denied = false;
             const started = performance.now();
 
-            if (!binding) {
+            if (fnName === IMAGE_TOOL_NAME && imageTool && !argsError) {
+                const approved = imageTool.autoApprove || await onToolApproval({
+                    toolName: fnName,
+                    originalName: 'Generar imagen',
+                    serverName: `Nodemat · ${imageTool.model}`,
+                    description: 'Genera una imagen con el proveedor configurado (consume tu cuota de ese proveedor).',
+                    args,
+                    annotations: { readOnlyHint: true, openWorldHint: true }
+                });
+                if (signal?.aborted) throw new DOMException('Cancelado por el usuario', 'AbortError');
+                if (approved) {
+                    const r = await runImageTool(args, liveSettings, fileRefs, signal);
+                    resultText = r.text;
+                    images = r.images;
+                    isError = r.isError;
+                    // Las imágenes nuevas quedan disponibles para editarlas en el siguiente turno
+                    images.forEach(img => fileRefs.set(FILE_REF_PREFIX + encodeURIComponent(img.name), img));
+                } else {
+                    resultText = "El usuario rechazó la generación de la imagen.";
+                    denied = true;
+                }
+            } else if (!binding) {
                 resultText = `Error: la herramienta "${fnName}" no existe o su servidor está desconectado.`;
                 isError = true;
             } else if (argsError) {
@@ -1130,7 +1220,8 @@ export const sendMessage = async (
             }
 
             apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, name: fnName, content: resultText });
-            turnImages.push(...images.filter(a => a.type.startsWith('image/')));
+            // Las imágenes recién generadas no se le reenvían al modelo: ya sabe qué pidió
+            if (fnName !== IMAGE_TOOL_NAME) turnImages.push(...images.filter(a => a.type.startsWith('image/')));
             emit({
                 id: uid(),
                 role: 'tool',
@@ -1140,8 +1231,8 @@ export const sendMessage = async (
                 attachments: images.length ? images : undefined,
                 timestamp: Date.now(),
                 toolMeta: {
-                    serverName: binding ? (binding.server.name || binding.server.serverInfo?.name || binding.server.url) : '—',
-                    originalName: binding?.originalName || fnName,
+                    serverName: fnName === IMAGE_TOOL_NAME ? `Nodemat · ${imageTool?.model}` : binding ? (binding.server.name || binding.server.serverInfo?.name || binding.server.url) : '—',
+                    originalName: fnName === IMAGE_TOOL_NAME ? 'Generar imagen' : binding?.originalName || fnName,
                     args,
                     isError,
                     denied,

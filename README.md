@@ -85,7 +85,11 @@ Permite usar tu suscripción de ChatGPT en lugar de una API key, con el mismo lo
 - Login: Ajustes → ChatGPT → "Iniciar sesión", y pegar la URL `localhost:1455/...` a la que redirige OpenAI (la página no carga: es normal). También se puede importar `~/.codex/auth.json`.
 
 ### 5. 🎨 Generación de Imágenes
-OpenAI (`gpt-image-1`, DALL·E), OpenRouter (modelos con salida de imagen), Gemini (`*-image` e Imagen) y xAI. Formatos, varias imágenes, edición con imágenes de referencia, insertar en el chat, compartir y descargar. Las imágenes se guardan en base64 para que no expiren.
+- OpenAI (`gpt-image-1`, DALL·E), OpenRouter (modelos con salida de imagen), Gemini (`*-image` e Imagen) y xAI. Formatos, varias imágenes, imágenes de referencia, insertar en el chat, compartir y descargar.
+- **Desde el chat:** en el generador marca "Usar este modelo cuando le pidas una imagen al chat" y cualquier modelo de conversación podrá generar imágenes solo (con tu aprobación), y editarlas en los turnos siguientes.
+- **Editar:** el botón ✨ de cualquier imagen del chat o de la galería la abre como referencia. Puedes **pintar la zona a cambiar**: OpenAI recibe una máscara real; Gemini y OpenRouter, la imagen con la zona marcada y la instrucción de tocar sólo eso.
+- **Galería** con todas las imágenes de todas las conversaciones (subidas, generadas y devueltas por herramientas), con filtros, edición, adjuntar y descargar.
+- Las imágenes se guardan en base64 para que no expiren; los adjuntos grandes se guardan aparte como Blob (una sola copia aunque aparezcan en varios mensajes), así las conversaciones quedan livianas.
 
 ### 6. 📎 Archivos y Compartir
 - **Imágenes** (se reducen automáticamente), **PDF** (nativo en OpenAI, OpenRouter y Gemini; en el resto se envía su texto, extraído con pdf.js) y **texto o código**.
