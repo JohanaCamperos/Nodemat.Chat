@@ -1,8 +1,8 @@
 # 🤖 Nodemat Chat
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![React](https://img.shields.io/badge/React-19-61DAFB.svg)
-![Vite](https://img.shields.io/badge/Vite-7-646CFF.svg)
+![React](https://img.shields.io/badge/React-18-61DAFB.svg)
+![Vite](https://img.shields.io/badge/Vite-6-646CFF.svg)
 
 **Nodemat Chat** es una plataforma de código abierto diseñada para **aprender cómo funcionan los Modelos de Lenguaje (LLMs) a través de sus APIs**. Todo se desarrolla y ejecuta en local, sin necesidad de un servidor backend, lo que la convierte en una herramienta ideal para experimentación y educación.
 
@@ -32,35 +32,52 @@ Conecta con múltiples proveedores de IA desde la misma interfaz:
 - **Groq** - Inferencia ultrarrápida
 - **OpenRouter** - Acceso a cientos de modelos
 - **OpenAI** - GPT-4o, o1, etc.
+- **Anthropic (Claude)** - directo desde el navegador, con razonamiento visible, PDFs e imágenes
 - **Google Gemini** - Los modelos de Google AI
 - **xAI (Grok)** - El modelo de xAI
 - **Custom** - Cualquier API compatible con OpenAI
 
+Las respuestas llegan **en streaming** (palabra por palabra) con todos los proveedores, incluidas las llamadas a herramientas, y se pueden detener en cualquier momento.
+
 ### 4. 🛠️ Cliente MCP (Model Context Protocol)
-Aprende cómo las IAs pueden ejecutar herramientas externas mediante el protocolo MCP.
-- Handshake completo (`initialize` → `notifications/initialized` → `tools/list` paginado)
-- Transportes **Streamable HTTP** (`/mcp`, spec 2025-06-18) y **SSE legacy** (`/sse`), con detección automática
-- Manejo de sesión (`Mcp-Session-Id`) y reconexión transparente si la sesión expira
-- Resultados con texto, imágenes, recursos y `structuredContent`
-- Aprobación por herramienta, "permitir siempre" y auto-aprobación por servidor; avisos para herramientas destructivas
-- Las llamadas y resultados quedan visibles en el chat para estudiar el ciclo agéntico
+Nodemat se conecta a **cualquier tipo de servidor MCP** y muestra en el chat cada llamada y su resultado, para estudiar el ciclo agéntico.
+
+**Versiones del protocolo.** Habla las dos eras y detecta sola cuál usa cada servidor:
+- **Moderna (2026-07-28, la vigente):** sin handshake ni sesión; `server/discover`, metadatos por petición (`_meta`), headers `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*`, pedidos de varios pasos (`input_required`) y `subscriptions/listen`.
+- **Clásica (2024-11-05 a 2025-11-25):** `initialize`, sesión `Mcp-Session-Id`, pedidos del servidor por el stream y GET de avisos.
+
+**Transportes.**
+- **Streamable HTTP** (`/mcp`) y **SSE antiguo** (`/sse`), con detección automática.
+- **Comando local (stdio):** servidores que se lanzan con `npx …`, `uvx …` o `node …`. El navegador no puede ejecutar procesos, así que lo hace el puente `/api/mcp-stdio`, que sólo existe cuando Nodemat corre en tu máquina (`npm run dev` o `npm start`), sólo acepta peticiones desde la misma máquina y se apaga con `MCP_STDIO_DISABLED=1`.
+
+**Autenticación.**
+- **OAuth 2.1 completo** para servidores como GitHub, Notion, Linear, Atlassian o Sentry: descubrimiento (RFC 9728 / 8414), registro dinámico del cliente (RFC 7591), PKCE, `resource` (RFC 8707) y renovación automática del token. Si el proveedor no permite el registro automático, se carga un Client ID propio (la URL de retorno es `https://tu-dominio/oauth/callback`).
+- Token Bearer, API key en cualquier header y **headers adicionales** propios.
+
+**Funciones.**
+- **Herramientas** con aprobación, "permitir siempre", auto-aprobación por servidor, avisos para herramientas destructivas, validación de argumentos contra el `inputSchema` antes de llamar, **progreso en vivo** y cancelación.
+- Las **imágenes** que devuelve una herramienta llegan al modelo (proveedores con visión) además de mostrarse.
+- **Recursos y prompts:** el botón 📖 del chat los lista para adjuntar un recurso (o una plantilla de URI) o usar un prompt con sus argumentos.
+- **Sampling** (el servidor pide una respuesta de tu modelo) y **elicitación** (formularios o abrir una URL), siempre con tu aprobación.
+- Si la lista de herramientas cambia, se actualiza sola.
+- "Detalle de la conexión" muestra cada paso del intento de conexión.
 
 #### Usar un MCP de n8n (o cualquier servidor sin CORS)
-La app incluye un **proxy same-origin** (`/api/mcp`, función serverless de Vercel; en desarrollo lo monta Vite). Como el navegador le habla al mismo dominio de la app, no hay CORS.
+La app incluye un **proxy same-origin** (`/api/mcp`, función serverless de Vercel; en local lo monta Vite). Como el navegador le habla al mismo dominio de la app, no hay CORS.
 1. En n8n, agrega un nodo **MCP Server Trigger**, activa el workflow y copia la *Production URL*.
 2. En Nodemat → Ajustes → Servidores MCP: pega la URL, deja **"Conectar vía proxy"** activado y conecta.
 3. Si n8n pide autenticación (Bearer o header), cárgala en "Autenticación"; el proxy la reenvía.
 
-**No hace falta configurar nada en Vercel.** El proxy no guarda nada y aplica reglas fijas: sólo servidores `https` públicos (bloquea IPs privadas, `localhost` y nombres que resuelven a la red interna). Opcionalmente, quien despliega puede endurecerlo con `MCP_PROXY_ALLOWED_HOSTS` y `NODEMAT_PROXY_TOKEN` (ver `.env.example`). En local (`npm run dev`) el proxy también acepta servidores de tu red.
+**No hace falta configurar nada en Vercel.** El proxy no guarda nada y aplica reglas fijas: sólo servidores `https` públicos (bloquea IPs privadas, `localhost` y nombres que resuelven a la red interna). Opcionalmente, quien despliega puede endurecerlo con `MCP_PROXY_ALLOWED_HOSTS` y `NODEMAT_PROXY_TOKEN` (ver `.env.example`). En local el proxy también acepta servidores de tu red.
 
 #### 🔒 Todo queda en tu navegador
-API keys, sesión de ChatGPT, servidores MCP, ajustes y conversaciones se guardan sólo en el navegador (localStorage + IndexedDB). En **Gestión de Datos → Configuración** puedes exportar todo a un archivo `.json` (cifrado con contraseña, AES-GCM) e importarlo en otra PC.
+API keys, sesión de ChatGPT, servidores MCP (y sus tokens OAuth), ajustes y conversaciones se guardan sólo en el navegador (localStorage + IndexedDB). En **Gestión de Datos → Configuración** puedes exportar todo a un archivo `.json` (cifrado con contraseña, AES-GCM) e importarlo en otra PC.
 
-> Límites: cada llamada pasa por una función de Vercel con `maxDuration` de 60 s (configurable en `vercel.json` según tu plan). Con proxy, prefiere **Streamable HTTP**: el transporte SSE legacy mantiene un stream abierto que Vercel corta a los 60 s (Nodemat reconecta, pero una herramienta en curso puede fallar).
+> Límites: cada llamada pasa por una función de Vercel con `maxDuration` de 60 s (configurable en `vercel.json` según tu plan). Con proxy, prefiere **Streamable HTTP**: el transporte SSE antiguo mantiene un stream abierto que Vercel corta a los 60 s (Nodemat reconecta, pero una herramienta en curso puede fallar).
 >
-> Seguridad: el proxy bloquea a *otros sitios web* desde el navegador, pero sin `NODEMAT_PROXY_TOKEN` cualquiera que conozca tu URL de Vercel podría usar `/api/mcp` (hacia servidores https públicos) y `/api/chatgpt` con sus propias credenciales, consumiendo tu cuota de Vercel. Es el precio de no tener configuración en el servidor.
+> Seguridad: el proxy bloquea a *otros sitios web* desde el navegador, pero sin `NODEMAT_PROXY_TOKEN` cualquiera que conozca tu URL de Vercel podría usar `/api/mcp` (hacia servidores https públicos) y `/api/chatgpt` con sus propias credenciales, consumiendo tu cuota de Vercel. Si defines `NODEMAT_PROXY_TOKEN`, carga el mismo valor en Ajustes → Servidores MCP → "Token del proxy".
 
-> Sin proxy, los servidores MCP deben permitir CORS (origen, headers `Mcp-Session-Id` y `MCP-Protocol-Version`, y exponer `Mcp-Session-Id`). Para servidores `stdio`, usa un puente como `npx supergateway --stdio "<comando>" --outputTransport streamableHttp --cors`.
+> Sin proxy, los servidores MCP remotos deben permitir CORS (origen, headers `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, y exponer `Mcp-Session-Id`).
 
 ### 🧪 Cuenta de ChatGPT (experimental)
 Permite usar tu suscripción de ChatGPT en lugar de una API key, con el mismo login OAuth que Codex CLI / OpenClaw (`/api/chatgpt` hace de puente porque `auth.openai.com` y `chatgpt.com` no permiten CORS). Los tokens se guardan sólo en tu navegador y se renuevan solos.
@@ -69,10 +86,18 @@ Permite usar tu suscripción de ChatGPT en lugar de una API key, con el mismo lo
 - Login: Ajustes → ChatGPT → "Iniciar sesión", y pegar la URL `localhost:1455/...` a la que redirige OpenAI (la página no carga: es normal). También se puede importar `~/.codex/auth.json`.
 
 ### 5. 🎨 Generación de Imágenes
-OpenAI (`gpt-image-1`, DALL·E), OpenRouter (modelos con salida de imagen), Gemini (`*-image` e Imagen) y xAI. Formatos, varias imágenes, edición con imágenes de referencia, insertar en el chat, compartir y descargar. Las imágenes se guardan en base64 para que no expiren.
+- OpenAI (`gpt-image-1`, DALL·E), OpenRouter (modelos con salida de imagen), Gemini (`*-image` e Imagen) y xAI. Formatos, varias imágenes, imágenes de referencia, insertar en el chat, compartir y descargar.
+- **Desde el chat:** en el generador marca "Usar este modelo cuando le pidas una imagen al chat" y cualquier modelo de conversación podrá generar imágenes solo (con tu aprobación), y editarlas en los turnos siguientes.
+- **Editar:** el botón ✨ de cualquier imagen del chat o de la galería la abre como referencia. Puedes **pintar la zona a cambiar**: OpenAI recibe una máscara real; Gemini y OpenRouter, la imagen con la zona marcada y la instrucción de tocar sólo eso.
+- **Galería** con todas las imágenes de todas las conversaciones (subidas, generadas y devueltas por herramientas), con filtros, edición, adjuntar y descargar.
+- Las imágenes se guardan en base64 para que no expiren; los adjuntos grandes se guardan aparte como Blob (una sola copia aunque aparezcan en varios mensajes), así las conversaciones quedan livianas.
 
 ### 6. 📎 Archivos y Compartir
-Imágenes (reducidas automáticamente), PDF (OpenAI / OpenRouter / Gemini) y archivos de texto/código. Arrastrar y soltar, pegar desde el portapapeles, exportar conversaciones a Markdown/JSON, importar backups y compartir con la hoja nativa del sistema.
+- **Imágenes** (se reducen automáticamente), **PDF** (nativo en OpenAI, OpenRouter y Gemini; en el resto se envía su texto, extraído con pdf.js) y **texto o código**.
+- **Word, Excel, PowerPoint y OpenDocument** (`.docx`, `.xlsx`, `.xls`, `.pptx`, `.odt`, `.ods`, `.odp`): se guarda el original y el modelo recibe el texto (cada hoja de cálculo como CSV, cada diapositiva con sus notas).
+- **Audio** (`.mp3`, `.wav`, `.m4a`, `.ogg`…): se transcribe con Groq (Whisper), OpenAI o Gemini, según la clave que tengas, y se puede escuchar en el chat. El botón 🎤 **dicta** el mensaje.
+- **Archivos para las herramientas MCP:** cada adjunto tiene una referencia `nodemat://adjunto/<nombre>`; cuando el modelo la usa como argumento, Nodemat la reemplaza por el contenido (base64, texto o data URL), así una herramienta puede, por ejemplo, subir el archivo a tu Drive.
+- Arrastrar y soltar, pegar desde el portapapeles, exportar conversaciones a Markdown/JSON, importar backups y compartir con la hoja nativa del sistema.
 
 ---
 
@@ -80,8 +105,8 @@ Imágenes (reducidas automáticamente), PDF (OpenAI / OpenRouter / Gemini) y arc
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/tu-usuario/nodemat-chat.git
-cd nodemat-chat
+git clone https://github.com/diegoparras/Nodemat-Chat.git
+cd Nodemat-Chat
 
 # 2. Instalar dependencias
 npm install
@@ -94,7 +119,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Abre `http://localhost:5173` en tu navegador.
+Abre `http://localhost:3000` en tu navegador.
 
 ---
 
@@ -146,24 +171,37 @@ Para preconfigurar proveedores compatibles con OpenAI (ej: Mistral, Together AI,
 ## 📂 Estructura del Proyecto
 
 ```
-nodemat-chat/
-├── App.tsx              # Componente principal de la app
-├── components/          # Componentes UI reutilizables
-│   ├── ChatImage.tsx    # Imágenes en chat (ampliar, compartir, descargar)
-│   ├── ImageGenModal.tsx # Generador de imágenes
-│   ├── ToolMessage.tsx  # Llamadas/resultados de herramientas MCP en el chat
-│   ├── FileUploadModal.tsx # Modal para adjuntar archivos
-│   └── SearchableSelect.tsx # Selector de modelos
+Nodemat-Chat/
+├── App.tsx                  # Estado y orquestación de la app
+├── config/defaults.ts       # Ajustes por defecto, temas y variables de entorno
+├── components/              # Interfaz: chat, ajustes, MCP, imágenes, galería, modales
 ├── services/
-│   ├── llmService.ts    # ⭐ Orquestador de llamadas a LLM (MUY DOCUMENTADO)
-│   ├── mcpClient.ts     # ⭐ Cliente MCP (handshake, transportes, sesiones)
-│   ├── imageGenService.ts # Generación de imágenes multi-proveedor
-│   ├── fileService.ts   # Adjuntos, compartir, exportar/importar
-│   └── storageService.ts # Persistencia en IndexedDB
-└── types.ts             # Definiciones de TypeScript
+│   ├── llmService.ts        # ⭐ Ciclo agéntico y formato de cada proveedor (MUY DOCUMENTADO)
+│   ├── anthropicProvider.ts # Messages API de Claude (bloques, thinking, streaming)
+│   ├── mcpClient.ts         # ⭐ Cliente MCP: las dos eras del protocolo, transportes, MRTR
+│   ├── mcpOAuth.ts          # OAuth 2.1 para servidores MCP
+│   ├── jsonSchema.ts        # Validación de argumentos de herramientas
+│   ├── documentService.ts   # Texto de Word, Excel, PowerPoint, OpenDocument y PDF
+│   ├── transcriptionService.ts # Audio a texto
+│   ├── imageGenService.ts   # Generación de imágenes multi-proveedor
+│   ├── fileService.ts       # Adjuntos, compartir, exportar/importar
+│   └── storageService.ts    # IndexedDB (adjuntos grandes como Blob)
+├── server/                  # Funciones de servidor: proxy MCP, puente ChatGPT, puente stdio
+├── api/                     # Entradas de Vercel para server/
+└── tests/                   # Tests (vitest)
 ```
 
-> **💡 Tip:** Comienza leyendo `services/llmService.ts`. Es el corazón de la aplicación y está extensamente documentado con explicaciones de cómo funcionan las APIs de LLM.
+> **💡 Tip:** Comienza leyendo `services/llmService.ts` y `services/mcpClient.ts`. Son el corazón de la aplicación y están documentados para aprender cómo funcionan las APIs de LLM y el protocolo MCP.
+
+### Scripts
+
+| Comando | Qué hace |
+| :--- | :--- |
+| `npm run dev` | Servidor de desarrollo en `http://localhost:3000` (incluye proxy MCP y puente stdio) |
+| `npm start` | Compila y sirve la versión final en local (modo "self-hosted", también con puente stdio) |
+| `npm run build` | Chequea tipos y compila para producción |
+| `npm test` | Tests |
+| `npm run lint` | ESLint |
 
 ---
 
@@ -176,9 +214,8 @@ nodemat-chat/
 - **Mitigación:** Usa navegación privada para sesiones temporales
 
 ### 🌐 Restricciones CORS
-- Algunas APIs (ej: Anthropic) no permiten llamadas directas desde navegadores
-- Esto es una limitación del navegador, no de Nodemat
-- **Alternativa:** Usar OpenRouter como intermediario
+- Algunas APIs no permiten llamadas directas desde navegadores (CORS)
+- Para servidores MCP y Claude, Nodemat reintenta por su proxy same-origin `/api/mcp`
 
 ### 📦 Límites de Almacenamiento
 - IndexedDB tiene límites que varían por navegador (~50MB - varios GB)
@@ -195,12 +232,14 @@ nodemat-chat/
 
 | Categoría | Tecnología |
 | :--- | :--- |
-| Framework | React 19 + TypeScript |
-| Build | Vite 7 |
-| Estilos | Tailwind CSS |
+| Framework | React 18 + TypeScript |
+| Build | Vite 6 |
+| Estilos | Tailwind CSS 4 |
 | Iconos | Lucide React |
 | Persistencia | IndexedDB (idb-keyval) |
-| Markdown | react-markdown + remark-gfm |
+| Markdown | react-markdown + remark-gfm, KaTeX (fórmulas), highlight.js (código) |
+| Documentos | mammoth, SheetJS, pdf.js, JSZip |
+| Calidad | TypeScript estricto, ESLint, vitest, GitHub Actions |
 
 ---
 

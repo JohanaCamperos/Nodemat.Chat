@@ -17,7 +17,7 @@
  * devuelven algunos proveedores expiran y rompen el historial del chat.
  */
 
-import { Provider } from "../types";
+import { AppSettings, Provider } from "../types";
 
 export type AspectRatio = '1:1' | '16:9' | '9:16' | '4:3' | '3:4';
 
@@ -36,6 +36,8 @@ export interface ImageGenRequest {
     quality?: 'auto' | 'low' | 'medium' | 'high';
     /** Imágenes de referencia (data URLs) para edición / variaciones */
     referenceImages?: string[];
+    /** Máscara PNG (transparente = zona a editar). Sólo la usa OpenAI */
+    mask?: string;
     customUrl?: string;
     signal?: AbortSignal;
 }
@@ -128,6 +130,18 @@ const IMAGE_FALLBACKS: Partial<Record<Provider, string[]>> = {
 
 export const IMAGE_PROVIDERS: Provider[] = ['openrouter', 'openai', 'gemini', 'xai', 'custom1', 'custom2'];
 
+/** API key y URL que corresponden a un proveedor de imágenes */
+export function imageCredentials(settings: AppSettings, provider: Provider): { apiKey: string; customUrl?: string } {
+    const keys: Partial<Record<Provider, string>> = {
+        openrouter: settings.openRouterKey, openai: settings.openaiKey, gemini: settings.geminiKey,
+        xai: settings.xaiKey, custom1: settings.custom1Key, custom2: settings.custom2Key
+    };
+    return {
+        apiKey: keys[provider] || '',
+        customUrl: provider === 'custom1' ? settings.custom1Url : provider === 'custom2' ? settings.custom2Url : undefined
+    };
+}
+
 /**
  * Obtiene sólo los modelos capaces de generar imágenes.
  * OpenRouter publica `architecture.output_modalities`, lo que permite un filtro exacto.
@@ -203,9 +217,10 @@ export const imageGenService = {
                 form.append('n', String(n));
                 form.append('size', OPENAI_SIZES[family][aspectRatio]);
                 referenceImages.forEach((img, i) => form.append(family === 'dall-e-2' ? 'image' : 'image[]', dataUrlToBlob(img), `ref-${i}.png`));
+                if (req.mask) form.append('mask', dataUrlToBlob(req.mask), 'mask.png');
                 if (family === 'dall-e-2') form.append('response_format', 'b64_json');
                 init = { method: 'POST', headers, body: form, signal };
-                loggedBody = { model, prompt, n, size: OPENAI_SIZES[family][aspectRatio], image: `[${referenceImages.length} imagen(es) de referencia]` };
+                loggedBody = { model, prompt, n, size: OPENAI_SIZES[family][aspectRatio], image: `[${referenceImages.length} imagen(es) de referencia]`, ...(req.mask ? { mask: '[máscara PNG]' } : {}) };
             } else {
                 endpoint = `${base}/images/generations`;
                 const body: any = { model, prompt, n };

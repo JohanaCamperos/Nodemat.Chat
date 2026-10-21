@@ -29,7 +29,10 @@
  */
 
 import { AppSettings, Message, Provider, MCPTool, MCPServer, Attachment, ToolCall } from "../types";
-import { callServerTool, connectServer, getFriendlyMCPError, readSSE } from "./mcpClient";
+import { callServerTool, connectServer, getFriendlyMCPError, readSSE, MCPProgress } from "./mcpClient";
+import { validateArgs } from "./jsonSchema";
+import { imageCredentials, imageGenService, AspectRatio } from "./imageGenService";
+import { ANTHROPIC_DEFAULT_MODEL, ANTHROPIC_FALLBACK_MODELS, callAnthropic, fetchAnthropicModels } from "./anthropicProvider";
 import { bridgeHeaders, CHATGPT_BRIDGE_PATH } from "./bridge";
 import { ensureFreshChatGPTToken } from "./chatgptAuth";
 
@@ -69,6 +72,8 @@ const PROVIDER_ENDPOINTS: Record<Provider, { chat: string; models: string }> = {
         chat: 'https://api.x.ai/v1/chat/completions',
         models: 'https://api.x.ai/v1/models'
     },
+    // Anthropic tiene su propio formato: ver anthropicProvider.ts
+    anthropic: { chat: '', models: '' },
     // Proveedores personalizados - URLs se configuran dinámicamente
     custom1: { chat: '', models: '' },
     custom2: { chat: '', models: '' },
@@ -87,8 +92,17 @@ const FALLBACK_MODELS: Partial<Record<Provider, string[]>> = {
     custom2: []
 };
 
+/** Proveedores que informan tokens en streaming sólo si se pide `stream_options.include_usage` */
+const STREAM_USAGE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'xai', 'cerebras'];
+
 /** Proveedores que aceptan PDFs de forma nativa en el chat */
-const PDF_NATIVE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt'];
+const PDF_NATIVE_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt', 'anthropic'];
+
+/**
+ * Proveedores con visión: a ellos se les reenvían las imágenes que devuelven
+ * las herramientas MCP (a los demás, sólo el texto, o la API rechazaría el turno).
+ */
+const VISION_PROVIDERS: Provider[] = ['openai', 'openrouter', 'gemini', 'chatgpt', 'xai', 'anthropic'];
 
 /** Máximo de rondas LLM <-> herramientas por mensaje del usuario */
 const MAX_TOOL_TURNS = 8;
@@ -109,6 +123,10 @@ export { getFriendlyMCPError };
  * formatos de respuesta ligeramente diferentes para su API de models.
  */
 export const fetchModels = async (provider: Provider, key: string, customUrl?: string): Promise<string[]> => {
+    if (provider === 'anthropic') {
+        const list = await fetchAnthropicModels(key);
+        return list.length ? list : ANTHROPIC_FALLBACK_MODELS;
+    }
     try {
         let endpoint = PROVIDER_ENDPOINTS[provider].models;
 
@@ -244,20 +262,150 @@ const buildUserContent = (text: string, attachments: Attachment[] | undefined, p
     if (!attachments || attachments.length === 0) return text;
 
     const parts: any[] = [{ type: "text", text: text || "" }];
+    const inline = (name: string, body: string) => { parts[0].text += `\n\n--- Archivo Adjunto: ${name} ---\n${body}\n-------------------`; };
     attachments.forEach(att => {
         if (att.type.startsWith('image/')) {
             parts.push({ type: "image_url", image_url: { url: att.data } });
         } else if (att.type === 'application/pdf') {
             if (PDF_NATIVE_PROVIDERS.includes(provider)) {
                 parts.push({ type: "file", file: { filename: att.name, file_data: att.data } });
+            } else if (att.extractedText) {
+                // Sin PDF nativo: el modelo lee el texto que sacamos con pdf.js
+                inline(att.name, att.extractedText);
             } else {
-                parts[0].text += `\n\n[Adjunto PDF "${att.name}" omitido: este proveedor no acepta PDFs. Usa OpenAI, OpenRouter o Gemini.]`;
+                parts[0].text += `\n\n[Adjunto PDF "${att.name}" omitido: no se pudo extraer su texto y este proveedor no acepta PDFs.]`;
             }
+        } else if (att.extractedText) {
+            // Word, Excel, PowerPoint, OpenDocument y audio: va el texto extraído / transcripto
+            inline(att.name, att.extractedText);
         } else {
-            parts[0].text += `\n\n--- Archivo Adjunto: ${att.name} ---\n${att.data}\n-------------------`;
+            inline(att.name, att.data);
         }
     });
     return parts;
+};
+
+// ============================================================================
+// HERRAMIENTA INTERNA: GENERAR IMÁGENES
+// ============================================================================
+
+/**
+ * EDUCATIVO: no todas las herramientas vienen de un servidor MCP. Nodemat le
+ * ofrece al modelo una propia, con la misma forma (nombre, descripción y JSON
+ * Schema), que llama al generador de imágenes configurado. Así cualquier
+ * modelo de chat, aunque no genere imágenes, puede "pedir" una.
+ */
+export const IMAGE_TOOL_NAME = 'nodemat_generar_imagen';
+
+const imageToolDefinition = (model: string) => ({
+    type: 'function',
+    function: {
+        name: IMAGE_TOOL_NAME,
+        description: `Genera o edita imágenes con el modelo ${model}. Úsala cuando el usuario pida una imagen, ilustración, logo, foto o dibujo. ` +
+            'El prompt debe ser detallado (sujeto, estilo, composición, luz, colores). Para editar una imagen existente, pasa su referencia nodemat://adjunto/… en "referencias".',
+        parameters: {
+            type: 'object',
+            properties: {
+                prompt: { type: 'string', description: 'Descripción detallada de la imagen a generar o del cambio a aplicar' },
+                formato: { type: 'string', enum: ['1:1', '16:9', '9:16', '4:3', '3:4'], description: 'Proporción de la imagen (por defecto 1:1)' },
+                referencias: { type: 'array', items: { type: 'string' }, description: 'Referencias nodemat://adjunto/… de imágenes a editar o a usar como estilo' }
+            },
+            required: ['prompt']
+        }
+    }
+});
+
+async function runImageTool(args: any, settings: AppSettings, fileRefs: Map<string, Attachment>, signal?: AbortSignal) {
+    const cfg = settings.imageTool!;
+    const { apiKey, customUrl } = imageCredentials(settings, cfg.provider);
+    if (!apiKey) return { text: `Error: falta la API key de ${cfg.provider} para generar imágenes.`, images: [] as Attachment[], isError: true };
+    const references = (Array.isArray(args.referencias) ? args.referencias : [])
+        .map((r: string) => fileRefs.get(String(r).split('?')[0])?.data)
+        .filter((d: string | undefined): d is string => !!d && d.startsWith('data:image/'));
+    const res = await imageGenService.generateImage({
+        prompt: String(args.prompt || ''),
+        model: cfg.model,
+        provider: cfg.provider,
+        apiKey,
+        customUrl,
+        aspectRatio: (['1:1', '16:9', '9:16', '4:3', '3:4'].includes(args.formato) ? args.formato : '1:1') as AspectRatio,
+        referenceImages: references,
+        signal
+    });
+    if (res.error || !res.images.length) return { text: `Error generando la imagen: ${res.error || 'sin imágenes'}`, images: [] as Attachment[], isError: true };
+    const stamp = Date.now();
+    const images: Attachment[] = res.images.map((img, i) => ({
+        name: `imagen-${stamp}-${i + 1}.${img.mimeType.split('/')[1] || 'png'}`,
+        type: img.mimeType,
+        data: img.url
+    }));
+    return {
+        text: `Se generaron ${images.length} imagen(es) con ${cfg.model} y ya se muestran al usuario. ` +
+            `Referencias para editarlas después: ${images.map(i => FILE_REF_PREFIX + encodeURIComponent(i.name)).join(', ')}.` +
+            (res.revised_prompt ? ` Prompt revisado por el proveedor: ${res.revised_prompt}` : ''),
+        images,
+        isError: false
+    };
+}
+
+// ============================================================================
+// ARCHIVOS PARA LAS HERRAMIENTAS MCP
+// ============================================================================
+
+/**
+ * EDUCATIVO: el modelo no puede "pasarle" un archivo a una herramienta (sólo
+ * escribe texto JSON). Entonces le damos una referencia corta por archivo
+ * subido, `nodemat://adjunto/<nombre>`, y cuando la usa como argumento Nodemat
+ * la reemplaza por el contenido real antes de llamar al servidor MCP:
+ *   - archivos binarios -> base64 (sin el prefijo data:)
+ *   - texto             -> el texto
+ *   - `?formato=dataurl` -> data URL completa; `?formato=texto` -> texto extraído
+ */
+export const FILE_REF_PREFIX = 'nodemat://adjunto/';
+
+export const buildFileRefs = (history: Message[]): Map<string, Attachment> => {
+    const refs = new Map<string, Attachment>();
+    history.forEach(m => (m.role === 'user' || m.role === 'tool' || m.role === 'model') && (m.attachments || []).forEach(att => {
+        let ref = FILE_REF_PREFIX + encodeURIComponent(att.name);
+        for (let n = 2; refs.has(ref) && refs.get(ref) !== att; n++) ref = `${FILE_REF_PREFIX}${encodeURIComponent(att.name)}-${n}`;
+        refs.set(ref, att);
+    }));
+    return refs;
+};
+
+const fileRefValue = (att: Attachment, format: string | null): string => {
+    const isDataUrl = att.data.startsWith('data:');
+    if (format === 'texto') return att.extractedText || (isDataUrl ? '' : att.data);
+    if (format === 'dataurl') return isDataUrl ? att.data : `data:${att.type || 'text/plain'};base64,${btoa(unescape(encodeURIComponent(att.data)))}`;
+    return isDataUrl ? att.data.slice(att.data.indexOf(',') + 1) : att.data;
+};
+
+/** Reemplaza (en profundidad) las referencias a adjuntos por su contenido. */
+export const resolveFileRefs = (value: any, refs: Map<string, Attachment>): any => {
+    if (typeof value === 'string' && value.startsWith(FILE_REF_PREFIX)) {
+        const [ref, query] = value.split('?');
+        const att = refs.get(ref);
+        return att ? fileRefValue(att, new URLSearchParams(query || '').get('formato')) : value;
+    }
+    if (Array.isArray(value)) return value.map(v => resolveFileRefs(v, refs));
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, resolveFileRefs(v, refs)]));
+    return value;
+};
+
+/**
+ * EDUCATIVO: el rol `tool` sólo admite texto en casi todas las APIs. Para que
+ * el modelo VEA una imagen devuelta por una herramienta (una captura, un
+ * gráfico…), se la mandamos a continuación como un mensaje de usuario.
+ */
+const toolImagesMessage = (images: Attachment[], provider: Provider) => {
+    if (!images.length || !VISION_PROVIDERS.includes(provider)) return null;
+    return {
+        role: 'user',
+        content: [
+            { type: 'text', text: `[Imágenes devueltas por las herramientas (${images.length})]` },
+            ...images.map(img => ({ type: 'image_url', image_url: { url: img.data } }))
+        ]
+    };
 };
 
 /**
@@ -276,23 +424,29 @@ const toApiMessages = (history: Message[], provider: Provider): any[] => {
             out.push({ role: 'user', content: buildUserContent(m.content || '', m.attachments, provider) });
         } else if (m.role === 'model' || m.role === 'assistant') {
             const msg: any = { role: 'assistant', content: stripDataUrls(m.content) };
+            // Claude necesita sus bloques originales (thinking incluido) en los turnos siguientes
+            if (provider === 'anthropic' && m.providerContent?.length) msg.anthropic_content = m.providerContent;
             if (m.toolCalls && m.toolCalls.length > 0) {
                 msg.tool_calls = m.toolCalls;
                 out.push(msg);
 
                 // Recolectar las respuestas que siguen
                 const answered = new Set<string>();
+                const toolImages: Attachment[] = [];
                 while (history[i + 1]?.role === 'tool') {
                     const t = history[++i];
                     answered.add(t.tool_call_id || '');
                     out.push({ role: 'tool', tool_call_id: t.tool_call_id, name: t.name, content: t.content || '' });
+                    toolImages.push(...(t.attachments || []).filter(a => a.type.startsWith('image/')));
                 }
                 m.toolCalls.forEach(tc => {
                     if (!answered.has(tc.id)) {
                         out.push({ role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: 'Ejecución interrumpida (sin resultado).' });
                     }
                 });
-            } else if (msg.content) {
+                const imgMsg = toolImagesMessage(toolImages, provider);
+                if (imgMsg) out.push(imgMsg);
+            } else if (msg.content || msg.anthropic_content) {
                 out.push(msg);
             }
         }
@@ -388,7 +542,7 @@ const buildGeminiRequest = (apiMessages: any[], tools: any[]) => {
 };
 
 /** Los proveedores OpenAI-compatibles no conocen `thought_signature`. */
-const toOpenAIMessages = (apiMessages: any[]) => apiMessages.map(m => {
+const toOpenAIMessages = (apiMessages: any[]) => apiMessages.map(({ anthropic_content, ...m }) => {
     if (!m.tool_calls) return m;
     return {
         ...m,
@@ -412,15 +566,21 @@ const callLLMProvider = async (
     apiMessages: any[],
     tools: any[],
     settings: AppSettings,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onDelta?: (text: string) => void
 ) => {
+    if (provider === 'anthropic') return callAnthropic(key, model, apiMessages, tools, signal, onDelta);
+
     let endpoint = PROVIDER_ENDPOINTS[provider].chat;
+    const stream = !!onDelta;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     let requestPayload: any;
 
     // Configuración específica por proveedor
     if (provider === 'gemini') {
         endpoint = endpoint.replace('{model}', encodeURIComponent(model));
+        // Streaming en Gemini: otro método (streamGenerateContent) y SSE con alt=sse
+        if (stream) endpoint = endpoint.replace(':generateContent', ':streamGenerateContent') + '?alt=sse';
         headers['x-goog-api-key'] = key;
         requestPayload = buildGeminiRequest(apiMessages, tools);
     } else {
@@ -438,7 +598,10 @@ const callLLMProvider = async (
             model: model,
             messages: toOpenAIMessages(apiMessages),
             tools: tools.length > 0 ? tools : undefined,
-            tool_choice: tools.length > 0 ? "auto" : undefined
+            tool_choice: tools.length > 0 ? "auto" : undefined,
+            ...(stream ? { stream: true } : {}),
+            // Sin esto, OpenAI no informa el uso de tokens cuando hay streaming
+            ...(stream && STREAM_USAGE_PROVIDERS.includes(provider) ? { stream_options: { include_usage: true } } : {})
         };
     }
 
@@ -461,9 +624,104 @@ const callLLMProvider = async (
         throw new Error(msg);
     }
 
+    // Algunos proveedores compatibles ignoran `stream`: entonces llega JSON común
+    const isSSE = (response.headers.get('content-type') || '').includes('text/event-stream');
+    if (stream && isSSE && response.body) {
+        const data = provider === 'gemini'
+            ? await collectGeminiStream(response.body, onDelta!)
+            : await collectOpenAIStream(response.body, onDelta!);
+        return { data, requestPayload };
+    }
     const responseData = await response.json();
     return { data: responseData, requestPayload };
 };
+
+// ============================================================================
+// STREAMING
+// ============================================================================
+
+/**
+ * EDUCATIVO: con `stream: true` la API no devuelve una respuesta sino muchos
+ * pedacitos (chunks) por SSE. Cada uno trae un `delta`: unas palabras de texto
+ * o un fragmento de una llamada a herramienta (¡los argumentos JSON también
+ * llegan por partes!). Acá los vamos juntando y al final armamos el mismo
+ * objeto que devolvería la API sin streaming, así el resto del código no cambia.
+ */
+export async function collectOpenAIStream(body: ReadableStream<Uint8Array>, onDelta: (text: string) => void) {
+    let content = '';
+    let id: string | undefined;
+    let usage: any;
+    const images: any[] = [];
+    const toolCalls: any[] = [];
+    let streamError: string | undefined;
+
+    await readSSE(body, (_event, data) => {
+        if (data.trim() === '[DONE]') return true;
+        let chunk: any;
+        try { chunk = JSON.parse(data); } catch { return; }
+        if (chunk.error) { streamError = chunk.error.message || JSON.stringify(chunk.error); return true; }
+        id = id || chunk.id;
+        usage = chunk.usage || chunk.x_groq?.usage || usage;
+        const delta = chunk.choices?.[0]?.delta || {};
+        if (typeof delta.content === 'string' && delta.content) {
+            content += delta.content;
+            onDelta(content);
+        }
+        if (Array.isArray(delta.images)) images.push(...delta.images);
+        (delta.tool_calls || []).forEach((tc: any) => {
+            const i = tc.index ?? toolCalls.length;
+            const cur = toolCalls[i] || (toolCalls[i] = { id: '', type: 'function', function: { name: '', arguments: '' } });
+            if (tc.id) cur.id = tc.id;
+            if (tc.function?.name) cur.function.name += tc.function.name;
+            if (tc.function?.arguments) cur.function.arguments += tc.function.arguments;
+        });
+    });
+
+    if (streamError) throw new Error(streamError);
+    const calls = toolCalls.filter(Boolean).map((tc, i) => ({ ...tc, id: tc.id || `call_${Date.now()}_${i}` }));
+    return {
+        id,
+        usage,
+        choices: [{ message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}), ...(images.length ? { images } : {}) } }]
+    };
+}
+
+/** Gemini manda respuestas parciales completas: se concatenan las `parts`. */
+export async function collectGeminiStream(body: ReadableStream<Uint8Array>, onDelta: (text: string) => void) {
+    const parts: any[] = [];
+    let text = '';
+    let usageMetadata: any;
+    let responseId: string | undefined;
+    let promptFeedback: any;
+
+    await readSSE(body, (_event, data) => {
+        let chunk: any;
+        try { chunk = JSON.parse(data); } catch { return; }
+        if (chunk.error) throw new Error(chunk.error.message || 'Error de Gemini');
+        usageMetadata = chunk.usageMetadata || usageMetadata;
+        responseId = responseId || chunk.responseId;
+        promptFeedback = chunk.promptFeedback || promptFeedback;
+        (chunk.candidates?.[0]?.content?.parts || []).forEach((p: any) => {
+            const last = parts[parts.length - 1];
+            // Los pedazos de texto consecutivos son UNA parte (si no, quedarían saltos de línea de más)
+            if (typeof p.text === 'string' && last && typeof last.text === 'string' && !!last.thought === !!p.thought && !p.thoughtSignature) {
+                last.text += p.text;
+            } else {
+                parts.push({ ...p });
+            }
+            if (typeof p.text === 'string' && !p.thought) {
+                text += p.text;
+                onDelta(text);
+            }
+        });
+    });
+
+    return {
+        responseId,
+        usageMetadata,
+        ...(parts.length ? { candidates: [{ content: { role: 'model', parts } }] } : { promptFeedback })
+    };
+}
 
 // ============================================================================
 // RESPONSE PARSERS
@@ -473,6 +731,9 @@ interface ParsedResponse {
     content: string;
     toolCalls?: ToolCall[];
     images: Attachment[];
+    /** Bloques originales (Claude) y resumen del razonamiento */
+    providerContent?: any[];
+    reasoning?: string;
 }
 
 /**
@@ -538,7 +799,9 @@ const parseOpenAIResponse = (data: any): ParsedResponse => {
     return {
         content,
         images,
-        toolCalls: message.tool_calls?.length ? message.tool_calls : undefined
+        toolCalls: message.tool_calls?.length ? message.tool_calls : undefined,
+        providerContent: data.anthropic_content,
+        reasoning: data.reasoning || (typeof message.reasoning === 'string' ? message.reasoning : undefined)
     };
 };
 
@@ -583,7 +846,7 @@ const callChatGPT = async (
     apiMessages: any[],
     tools: any[],
     settings: AppSettings,
-    options: { signal?: AbortSignal; onSettingsPatch?: (p: Partial<AppSettings>) => void; sessionId?: string }
+    options: { signal?: AbortSignal; onSettingsPatch?: (p: Partial<AppSettings>) => void; sessionId?: string; onDelta?: (text: string) => void }
 ): Promise<{ data: any; requestPayload: any; parsed: ParsedResponse }> => {
     const requestPayload = {
         model,
@@ -646,11 +909,15 @@ const callChatGPT = async (
     const items: any[] = [];
     let completed: any = null;
     let failure: string | null = null;
+    let streamed = '';
 
     await readSSE(res.body, (_event, raw) => {
         let ev: any;
         try { ev = JSON.parse(raw); } catch { return; }
         switch (ev.type) {
+            case 'response.output_text.delta':
+                if (typeof ev.delta === 'string') { streamed += ev.delta; options.onDelta?.(streamed); }
+                break;
             case 'response.output_item.done':
                 if (ev.item) items.push(ev.item);
                 break;
@@ -687,6 +954,49 @@ const callChatGPT = async (
     };
 };
 
+/** API key y modelo del proveedor activo (con modelos por defecto razonables). */
+export const resolveProvider = (settings: AppSettings): { key: string; model: string } => {
+    const map: Record<Provider, { key: string; model: string }> = {
+        groq: { key: settings.groqKey, model: settings.groqModel || 'llama-3.1-8b-instant' },
+        openrouter: { key: settings.openRouterKey, model: settings.openRouterModel || 'openai/gpt-4o-mini' },
+        openai: { key: settings.openaiKey, model: settings.openaiModel || 'gpt-4o-mini' },
+        anthropic: { key: settings.anthropicKey, model: settings.anthropicModel || ANTHROPIC_DEFAULT_MODEL },
+        cerebras: { key: settings.cerebrasKey, model: settings.cerebrasModel || 'llama3.1-8b' },
+        gemini: { key: settings.geminiKey, model: settings.geminiModel || 'gemini-2.5-flash' },
+        xai: { key: settings.xaiKey, model: settings.xaiModel || 'grok-3-mini' },
+        custom1: { key: settings.custom1Key, model: settings.custom1Model },
+        custom2: { key: settings.custom2Key, model: settings.custom2Model },
+        chatgpt: { key: settings.chatgptKey, model: settings.chatgptModel || 'gpt-5' }
+    };
+
+    return map[settings.activeProvider];
+};
+
+/**
+ * Una sola respuesta del modelo activo, sin herramientas.
+ * La usa el "sampling" de MCP: un servidor le pide a NUESTRO modelo que genere
+ * texto (por ejemplo, para resumir algo dentro de una herramienta).
+ */
+export const completeOnce = async (
+    settings: AppSettings,
+    messages: { role: 'user' | 'assistant'; content: any }[],
+    options: { systemPrompt?: string; signal?: AbortSignal; onSettingsPatch?: (p: Partial<AppSettings>) => void } = {}
+): Promise<{ text: string; model: string }> => {
+    const { key, model } = resolveProvider(settings);
+    if (!key) throw new Error('No hay un proveedor de IA conectado.');
+    const apiMessages = [
+        ...(options.systemPrompt ? [{ role: 'system', content: options.systemPrompt }] : []),
+        ...messages
+    ];
+    if (settings.activeProvider === 'chatgpt') {
+        const { parsed } = await callChatGPT(model, apiMessages, [], settings, { signal: options.signal, onSettingsPatch: options.onSettingsPatch });
+        return { text: parsed.content, model };
+    }
+    const { data } = await callLLMProvider(settings.activeProvider, key, model, apiMessages, [], settings, options.signal);
+    const parsed = settings.activeProvider === 'gemini' ? parseGeminiResponse(data) : parseOpenAIResponse(data);
+    return { text: parsed.content, model };
+};
+
 // ============================================================================
 // MAIN MESSAGE FLOW
 // ============================================================================
@@ -710,6 +1020,13 @@ export interface SendMessageOptions {
     onSettingsPatch?: (patch: Partial<AppSettings>) => void;
     /** Identificador estable de la conversación (cache de prompts en ChatGPT). */
     sessionId?: string;
+    /**
+     * Texto parcial de la respuesta mientras el modelo la escribe (streaming).
+     * null = terminó ese turno. Si no se pasa, no se pide streaming.
+     */
+    onStream?: (partialText: string | null) => void;
+    /** Avisos de progreso de una herramienta en curso (si el servidor los manda). */
+    onToolProgress?: (toolName: string, progress: MCPProgress | null) => void;
 }
 
 /**
@@ -734,20 +1051,7 @@ export const sendMessage = async (
     const { onToolApproval, onUpdate, signal } = options;
     const { activeProvider } = settings;
 
-    // Mapeo de keys y modelos por proveedor
-    const providerKeyMap: Record<Provider, { key: string; model: string }> = {
-        groq: { key: settings.groqKey, model: settings.groqModel || 'llama-3.1-8b-instant' },
-        openrouter: { key: settings.openRouterKey, model: settings.openRouterModel || 'openai/gpt-4o-mini' },
-        openai: { key: settings.openaiKey, model: settings.openaiModel || 'gpt-4o-mini' },
-        cerebras: { key: settings.cerebrasKey, model: settings.cerebrasModel || 'llama3.1-8b' },
-        gemini: { key: settings.geminiKey, model: settings.geminiModel || 'gemini-2.5-flash' },
-        xai: { key: settings.xaiKey, model: settings.xaiModel || 'grok-3-mini' },
-        custom1: { key: settings.custom1Key, model: settings.custom1Model },
-        custom2: { key: settings.custom2Key, model: settings.custom2Model },
-        chatgpt: { key: settings.chatgptKey, model: settings.chatgptModel || 'gpt-5' }
-    };
-
-    const { key, model } = providerKeyMap[activeProvider];
+    const { key, model } = resolveProvider(settings);
 
     if (!key) throw new Error(`La API Key para ${activeProvider} no está configurada.`);
 
@@ -756,8 +1060,20 @@ export const sendMessage = async (
 
     const { bindings, defs: activeToolsDefs } = buildToolRegistry(settings.mcpServers);
 
+    const fileRefs = buildFileRefs(history);
+
+    // Herramienta interna de imágenes (si el usuario eligió un modelo para el chat)
+    const imageTool = settings.imageTool?.enabled && imageCredentials(settings, settings.imageTool.provider).apiKey ? settings.imageTool : null;
+    if (imageTool) activeToolsDefs.push(imageToolDefinition(imageTool.model));
+
     if (activeToolsDefs.length > 0) {
         systemInstruction += "\n\nTienes acceso a herramientas externas (MCP). Úsalas cuando sea necesario.";
+        if (fileRefs.size > 0) {
+            systemInstruction += "\n\nArchivos de esta conversación que puedes pasarle a una herramienta: usa la referencia como valor del argumento " +
+                "y Nodemat la reemplaza por el contenido (base64 si es binario, texto si es texto; agrega ?formato=dataurl para una data URL " +
+                "o ?formato=texto para el texto extraído):\n" +
+                [...fileRefs.entries()].map(([ref, att]) => `- ${ref} (${att.type || 'desconocido'}${att.size ? `, ${att.size} bytes` : ''})`).join('\n');
+        }
         // La spec MCP permite que el servidor envíe "instructions" para el modelo
         const withInstructions = new Set(Object.values(bindings).map(b => b.server));
         withInstructions.forEach(s => {
@@ -783,12 +1099,13 @@ export const sendMessage = async (
         let data: any, requestPayload: any, parsed: ParsedResponse;
         if (activeProvider === 'chatgpt') {
             ({ data, requestPayload, parsed } = await callChatGPT(model, apiMessages, activeToolsDefs, liveSettings, {
-                signal, onSettingsPatch: patchSettings, sessionId: options.sessionId
+                signal, onSettingsPatch: patchSettings, sessionId: options.sessionId, onDelta: options.onStream
             }));
         } else {
-            ({ data, requestPayload } = await callLLMProvider(activeProvider, key, model, apiMessages, activeToolsDefs, settings, signal));
+            ({ data, requestPayload } = await callLLMProvider(activeProvider, key, model, apiMessages, activeToolsDefs, settings, signal, options.onStream));
             parsed = activeProvider === 'gemini' ? parseGeminiResponse(data) : parseOpenAIResponse(data);
         }
+        options.onStream?.(null);
 
         const usage = data.usage ? {
             input: data.usage.prompt_tokens || data.usage.input_tokens || 0,
@@ -815,6 +1132,8 @@ export const sendMessage = async (
                 role: 'model',
                 content: parsed.content,
                 attachments: parsed.images.length ? parsed.images : undefined,
+                providerContent: parsed.providerContent,
+                reasoning: parsed.reasoning,
                 timestamp: Date.now(),
                 usage,
                 rawDebug
@@ -823,23 +1142,27 @@ export const sendMessage = async (
         }
 
         // El modelo quiere ejecutar herramientas
-        apiMessages.push({ role: 'assistant', content: parsed.content, tool_calls: parsed.toolCalls });
+        apiMessages.push({ role: 'assistant', content: parsed.content, tool_calls: parsed.toolCalls, anthropic_content: parsed.providerContent });
         emit({
             id: uid(),
             role: 'model',
             content: parsed.content,
             toolCalls: parsed.toolCalls,
+            providerContent: parsed.providerContent,
+            reasoning: parsed.reasoning,
             timestamp: Date.now(),
             usage,
             rawDebug
         });
 
+        const turnImages: Attachment[] = [];
         for (const toolCall of parsed.toolCalls) {
             const fnName = toolCall.function.name;
             const binding = bindings[fnName];
 
             let args: any = {};
             let argsError = false;
+            let validation: ReturnType<typeof validateArgs> | undefined;
             try {
                 args = toolCall.function.arguments ? JSON.parse(toolCall.function.arguments) : {};
             } catch {
@@ -852,13 +1175,39 @@ export const sendMessage = async (
             let denied = false;
             const started = performance.now();
 
-            if (!binding) {
+            if (fnName === IMAGE_TOOL_NAME && imageTool && !argsError) {
+                const approved = imageTool.autoApprove || await onToolApproval({
+                    toolName: fnName,
+                    originalName: 'Generar imagen',
+                    serverName: `Nodemat · ${imageTool.model}`,
+                    description: 'Genera una imagen con el proveedor configurado (consume tu cuota de ese proveedor).',
+                    args,
+                    annotations: { readOnlyHint: true, openWorldHint: true }
+                });
+                if (signal?.aborted) throw new DOMException('Cancelado por el usuario', 'AbortError');
+                if (approved) {
+                    const r = await runImageTool(args, liveSettings, fileRefs, signal);
+                    resultText = r.text;
+                    images = r.images;
+                    isError = r.isError;
+                    // Las imágenes nuevas quedan disponibles para editarlas en el siguiente turno
+                    images.forEach(img => fileRefs.set(FILE_REF_PREFIX + encodeURIComponent(img.name), img));
+                } else {
+                    resultText = "El usuario rechazó la generación de la imagen.";
+                    denied = true;
+                }
+            } else if (!binding) {
                 resultText = `Error: la herramienta "${fnName}" no existe o su servidor está desconectado.`;
                 isError = true;
             } else if (argsError) {
                 resultText = `Error: los argumentos no son JSON válido: ${toolCall.function.arguments}`;
                 isError = true;
+            } else if ((validation = validateArgs(binding.tool.inputSchema, args)).errors.length) {
+                // Se le devuelve el error al modelo para que corrija y reintente
+                resultText = `Error: argumentos inválidos para "${binding.originalName}": ${validation.errors.join('; ')}. Corrígelos y vuelve a intentar.`;
+                isError = true;
             } else {
+                args = validation.value;
                 const serverName = binding.server.name || binding.server.serverInfo?.name || binding.server.url;
                 const approved = binding.server.autoApprove || await onToolApproval({
                     toolName: fnName,
@@ -873,14 +1222,17 @@ export const sendMessage = async (
 
                 if (approved) {
                     try {
-                        const r = await callServerTool(binding.server, binding.originalName, args, signal);
+                        const r = await callServerTool(binding.server, binding.originalName, resolveFileRefs(args, fileRefs), signal,
+                            p => options.onToolProgress?.(binding.originalName, p));
                         resultText = r.text || '(sin contenido)';
-                        images = r.images;
+                        images = r.attachments;
                         isError = r.isError;
                     } catch (err: any) {
                         if (err?.name === 'AbortError') throw err;
-                        resultText = `Error ejecutando la herramienta: ${err.message}`;
+                        resultText = `Error ejecutando la herramienta: ${getFriendlyMCPError(err)}`;
                         isError = true;
+                    } finally {
+                        options.onToolProgress?.(binding.originalName, null);
                     }
                 } else {
                     resultText = "El usuario rechazó la ejecución de esta herramienta.";
@@ -889,6 +1241,8 @@ export const sendMessage = async (
             }
 
             apiMessages.push({ role: 'tool', tool_call_id: toolCall.id, name: fnName, content: resultText });
+            // Las imágenes recién generadas no se le reenvían al modelo: ya sabe qué pidió
+            if (fnName !== IMAGE_TOOL_NAME) turnImages.push(...images.filter(a => a.type.startsWith('image/')));
             emit({
                 id: uid(),
                 role: 'tool',
@@ -898,8 +1252,8 @@ export const sendMessage = async (
                 attachments: images.length ? images : undefined,
                 timestamp: Date.now(),
                 toolMeta: {
-                    serverName: binding ? (binding.server.name || binding.server.serverInfo?.name || binding.server.url) : '—',
-                    originalName: binding?.originalName || fnName,
+                    serverName: fnName === IMAGE_TOOL_NAME ? `Nodemat · ${imageTool?.model}` : binding ? (binding.server.name || binding.server.serverInfo?.name || binding.server.url) : '—',
+                    originalName: fnName === IMAGE_TOOL_NAME ? 'Generar imagen' : binding?.originalName || fnName,
                     args,
                     isError,
                     denied,
@@ -907,6 +1261,8 @@ export const sendMessage = async (
                 }
             });
         }
+        const imgMsg = toolImagesMessage(turnImages, activeProvider);
+        if (imgMsg) apiMessages.push(imgMsg);
     }
 
     // Límite de seguridad alcanzado

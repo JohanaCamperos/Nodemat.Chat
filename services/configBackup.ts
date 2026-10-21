@@ -45,7 +45,7 @@ const toB64 = (buf: ArrayBuffer | Uint8Array) => {
 };
 const fromB64 = (b64: string) => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
 
-async function deriveKey(password: string, salt: Uint8Array, iterations: number) {
+async function deriveKey(password: string, salt: Uint8Array<ArrayBuffer>, iterations: number) {
     const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
     return crypto.subtle.deriveKey(
         { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },

@@ -112,7 +112,7 @@ export async function handleChatGPT(request: Request, env: ChatGPTEnv): Promise<
     if (request.method !== 'POST') return json(405, { error: 'Usa POST' });
     if (isCrossSite(request)) return json(403, { error: 'Sólo se acepta desde la propia app.' });
     if (env.NODEMAT_PROXY_TOKEN && request.headers.get('x-nodemat-proxy-token') !== env.NODEMAT_PROXY_TOKEN) {
-        return json(401, { error: 'Token del proxy inválido o ausente. Configúralo en Ajustes.' });
+        return json(401, { error: 'Token del proxy inválido o ausente: este servidor exige NODEMAT_PROXY_TOKEN. Cárgalo en Ajustes → Servidores MCP → "Token del proxy".' });
     }
 
     const action = new URL(request.url).searchParams.get('action');

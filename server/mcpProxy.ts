@@ -97,7 +97,7 @@ export function isHostAllowed(hostname: string, allowList: string): boolean {
 }
 
 /** Rechaza peticiones originadas en otro sitio (otra web usando tu proxy desde el navegador de alguien). */
-function isCrossSite(request: Request): boolean {
+export function isCrossSite(request: Request): boolean {
     const site = request.headers.get('sec-fetch-site');
     if (site && site !== 'same-origin' && site !== 'none') return true;
     const origin = request.headers.get('origin');
