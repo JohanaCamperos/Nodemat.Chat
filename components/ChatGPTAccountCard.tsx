@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { CheckCircle2, ExternalLink, AlertTriangle, RefreshCw, LogIn, FileJson, ChevronDown } from 'lucide-react';
 import { AppSettings } from '../types';
 import { SearchableSelect } from './SearchableSelect';
+import { SecretInput } from './SecretInput';
 import {
     startChatGPTLogin, completeChatGPTLogin, importCodexAuthJson, accountToSettings, fetchChatGPTModels, ensureFreshChatGPTToken, ChatGPTAccount
 } from '../services/chatgptAuth';
@@ -173,6 +174,23 @@ export const ChatGPTAccountCard: React.FC<Props> = ({ settings, setSettings }) =
             )}
 
             {error && <p className="mt-3 text-xs text-red-500 whitespace-pre-wrap">{error}</p>}
+
+            {/proxy/i.test(error) && (
+                // El rechazo viene del servidor de Nodemat (NODEMAT_PROXY_TOKEN), no de OpenAI:
+                // el código de la URL no se llegó a usar, así que se puede reintentar con la misma URL.
+                <div className="mt-2 space-y-1 text-xs text-text-muted">
+                    <p>
+                        Este despliegue tiene definida la variable <code>NODEMAT_PROXY_TOKEN</code>. Escribe aquí el mismo valor
+                        y vuelve a pulsar <strong>Conectar</strong> (la URL pegada sigue sirviendo).
+                    </p>
+                    <SecretInput
+                        value={settings.proxyToken || ''}
+                        onChange={e => { const val = e.target.value; setSettings(s => ({ ...s, proxyToken: val })); }}
+                        placeholder="Token del proxy"
+                        className="p-2 text-sm border border-border bg-background text-text-main rounded-lg outline-none font-mono"
+                    />
+                </div>
+            )}
         </div>
     );
 };
