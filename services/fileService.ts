@@ -68,7 +68,8 @@ const readAs = (file: Blob, mode: 'dataURL' | 'text') => new Promise<string>((re
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = () => reject(reader.error || new Error('Error leyendo el archivo'));
-    mode === 'dataURL' ? reader.readAsDataURL(file) : reader.readAsText(file);
+    if (mode === 'dataURL') reader.readAsDataURL(file);
+    else reader.readAsText(file);
 });
 
 /**

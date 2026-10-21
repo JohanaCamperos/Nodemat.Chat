@@ -31,7 +31,9 @@ const xmlText = (xml: string, tag: RegExp) => {
 
 export async function extractDocx(buf: ArrayBuffer): Promise<string> {
     const mammoth = await import('mammoth');
-    const { value } = await mammoth.extractRawText({ arrayBuffer: buf });
+    // El build de navegador de mammoth lee `arrayBuffer`; el de Node (tests, servidor) lee `buffer`
+    const input: any = typeof Buffer !== 'undefined' ? { buffer: Buffer.from(buf) } : { arrayBuffer: buf };
+    const { value } = await mammoth.extractRawText(input);
     return clip(value.trim());
 }
 

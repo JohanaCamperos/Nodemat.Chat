@@ -64,6 +64,8 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
         const preferred = settings.imageTool?.provider;
         if (preferred && keyFor(preferred) && provider !== preferred) setProvider(preferred);
         else if (!keyFor(provider) && availableProviders.length > 0) setProvider(availableProviders[0]);
+        // Sólo al abrir: después manda lo que elija el usuario
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen]);
 
     // Abierto desde "Editar": la imagen queda como referencia
@@ -74,6 +76,8 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
             setResult({ images: [], logs: null, error: null });
         }
     }, [isOpen, initialReference]);
+
+    const currentProviderKey = keyFor(provider);
 
     // Cargar modelos de imagen cuando cambia el proveedor
     useEffect(() => {
@@ -92,7 +96,9 @@ export const ImageGenModal: React.FC<ImageGenModalProps> = ({ isOpen, onClose, s
             })
             .finally(() => !cancelled && setIsLoadingModels(false));
         return () => { cancelled = true; };
-    }, [provider, isOpen, keyFor(provider)]);
+        // Se recarga al cambiar de proveedor, al abrir o al cargar su API key
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [provider, isOpen, currentProviderKey]);
 
     if (!isOpen) return null;
 

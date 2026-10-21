@@ -7,8 +7,6 @@ export const ManageModal: React.FC<any> = ({ isOpen, onClose, onExport, onImport
 
     if (!isOpen) return null;
 
-    const limit = 5 * 1024 * 1024; // 5MB approx limit
-    const percentage = Math.min(100, (storageUsage.used / limit) * 100);
 
     return (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">

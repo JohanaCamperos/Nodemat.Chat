@@ -66,14 +66,14 @@ export const Markdown: React.FC<{ children: string }> = ({ children }) => (
             h1: ({ node, ...props }) => <h1 className="text-xl font-bold mt-4 mb-2" {...props} />,
             h2: ({ node, ...props }) => <h2 className="text-lg font-bold mt-3 mb-2" {...props} />,
             h3: ({ node, ...props }) => <h3 className="text-base font-bold mt-2 mb-1" {...props} />,
-            code: ({ node, className, children, ...props }) => {
+            code: ({ node: _node, className, children, ...props }) => {
                 // Dentro de un bloque (<pre>) el estilo lo pone CodeBlock y el resaltado
                 const isBlock = /language-|hljs/.test(className || '') || String(children).includes('\n');
                 return isBlock
                     ? <code className={`${className || ''} font-mono text-gray-100`} {...props}>{children}</code>
                     : <code className="bg-surface-highlight dark:bg-black/30 px-1 py-0.5 rounded font-mono text-sm" {...props}>{children}</code>;
             },
-            pre: ({ node, children }) => <CodeBlock>{children}</CodeBlock>,
+            pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
             table: ({ node, ...props }) => <div className="overflow-x-auto my-3 border border-border rounded-lg"><table className="w-full text-sm border-collapse" {...props} /></div>,
             thead: ({ node, ...props }) => <thead className="bg-surface-highlight text-text-muted font-semibold" {...props} />,
             th: ({ node, ...props }) => <th className="p-2 border-b border-r border-border last:border-r-0 text-left" {...props} />,

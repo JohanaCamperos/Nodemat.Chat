@@ -1,7 +1,7 @@
 import React from 'react';
 import { Terminal, X } from 'lucide-react';
 
-export const SystemPromptModal = ({ isOpen, onClose, prompt, onChange, educationalMode }: any) => {
+export const SystemPromptModal = ({ isOpen, onClose, prompt, onChange, }: any) => {
     if (!isOpen) return null;
     return (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4 text-text-main">

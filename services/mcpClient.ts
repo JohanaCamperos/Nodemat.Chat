@@ -800,7 +800,8 @@ export class MCPConnection {
         } else if (m.id !== undefined && this.pending.has(m.id) && (m.result !== undefined || m.error)) {
             const p = this.pending.get(m.id)!;
             this.pending.delete(m.id);
-            m.error ? p.reject(new MCPError(m.error.message, undefined, m.error.code, m.error.data)) : p.resolve(m.result);
+            if (m.error) p.reject(new MCPError(m.error.message, undefined, m.error.code, m.error.data));
+            else p.resolve(m.result);
         }
     }
 

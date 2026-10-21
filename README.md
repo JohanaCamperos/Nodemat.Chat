@@ -171,24 +171,37 @@ Para preconfigurar proveedores compatibles con OpenAI (ej: Mistral, Together AI,
 ## 📂 Estructura del Proyecto
 
 ```
-nodemat-chat/
-├── App.tsx              # Componente principal de la app
-├── components/          # Componentes UI reutilizables
-│   ├── ChatImage.tsx    # Imágenes en chat (ampliar, compartir, descargar)
-│   ├── ImageGenModal.tsx # Generador de imágenes
-│   ├── ToolMessage.tsx  # Llamadas/resultados de herramientas MCP en el chat
-│   ├── FileUploadModal.tsx # Modal para adjuntar archivos
-│   └── SearchableSelect.tsx # Selector de modelos
+Nodemat-Chat/
+├── App.tsx                  # Estado y orquestación de la app
+├── config/defaults.ts       # Ajustes por defecto, temas y variables de entorno
+├── components/              # Interfaz: chat, ajustes, MCP, imágenes, galería, modales
 ├── services/
-│   ├── llmService.ts    # ⭐ Orquestador de llamadas a LLM (MUY DOCUMENTADO)
-│   ├── mcpClient.ts     # ⭐ Cliente MCP (handshake, transportes, sesiones)
-│   ├── imageGenService.ts # Generación de imágenes multi-proveedor
-│   ├── fileService.ts   # Adjuntos, compartir, exportar/importar
-│   └── storageService.ts # Persistencia en IndexedDB
-└── types.ts             # Definiciones de TypeScript
+│   ├── llmService.ts        # ⭐ Ciclo agéntico y formato de cada proveedor (MUY DOCUMENTADO)
+│   ├── anthropicProvider.ts # Messages API de Claude (bloques, thinking, streaming)
+│   ├── mcpClient.ts         # ⭐ Cliente MCP: las dos eras del protocolo, transportes, MRTR
+│   ├── mcpOAuth.ts          # OAuth 2.1 para servidores MCP
+│   ├── jsonSchema.ts        # Validación de argumentos de herramientas
+│   ├── documentService.ts   # Texto de Word, Excel, PowerPoint, OpenDocument y PDF
+│   ├── transcriptionService.ts # Audio a texto
+│   ├── imageGenService.ts   # Generación de imágenes multi-proveedor
+│   ├── fileService.ts       # Adjuntos, compartir, exportar/importar
+│   └── storageService.ts    # IndexedDB (adjuntos grandes como Blob)
+├── server/                  # Funciones de servidor: proxy MCP, puente ChatGPT, puente stdio
+├── api/                     # Entradas de Vercel para server/
+└── tests/                   # Tests (vitest)
 ```
 
-> **💡 Tip:** Comienza leyendo `services/llmService.ts`. Es el corazón de la aplicación y está extensamente documentado con explicaciones de cómo funcionan las APIs de LLM.
+> **💡 Tip:** Comienza leyendo `services/llmService.ts` y `services/mcpClient.ts`. Son el corazón de la aplicación y están documentados para aprender cómo funcionan las APIs de LLM y el protocolo MCP.
+
+### Scripts
+
+| Comando | Qué hace |
+| :--- | :--- |
+| `npm run dev` | Servidor de desarrollo en `http://localhost:3000` (incluye proxy MCP y puente stdio) |
+| `npm start` | Compila y sirve la versión final en local (modo "self-hosted", también con puente stdio) |
+| `npm run build` | Chequea tipos y compila para producción |
+| `npm test` | Tests |
+| `npm run lint` | ESLint |
 
 ---
 
@@ -201,9 +214,8 @@ nodemat-chat/
 - **Mitigación:** Usa navegación privada para sesiones temporales
 
 ### 🌐 Restricciones CORS
-- Algunas APIs (ej: Anthropic) no permiten llamadas directas desde navegadores
-- Esto es una limitación del navegador, no de Nodemat
-- **Alternativa:** Usar OpenRouter como intermediario
+- Algunas APIs no permiten llamadas directas desde navegadores (CORS)
+- Para servidores MCP y Claude, Nodemat reintenta por su proxy same-origin `/api/mcp`
 
 ### 📦 Límites de Almacenamiento
 - IndexedDB tiene límites que varían por navegador (~50MB - varios GB)
@@ -222,10 +234,12 @@ nodemat-chat/
 | :--- | :--- |
 | Framework | React 18 + TypeScript |
 | Build | Vite 6 |
-| Estilos | Tailwind CSS |
+| Estilos | Tailwind CSS 4 |
 | Iconos | Lucide React |
 | Persistencia | IndexedDB (idb-keyval) |
-| Markdown | react-markdown + remark-gfm |
+| Markdown | react-markdown + remark-gfm, KaTeX (fórmulas), highlight.js (código) |
+| Documentos | mammoth, SheetJS, pdf.js, JSZip |
+| Calidad | TypeScript estricto, ESLint, vitest, GitHub Actions |
 
 ---
 

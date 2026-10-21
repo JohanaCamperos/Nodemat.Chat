@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Menu, X, Plus, MessageSquare, Trash2, RefreshCw, Copy, Check, Square, Paperclip, ChevronDown, Upload, Key, Server, Wrench, VenetianMask, EyeOff, FileCode } from 'lucide-react';
+import { Send, Menu, X, Plus, MessageSquare, Trash2, RefreshCw, Copy, Square, Paperclip, ChevronDown, Upload, Wrench, VenetianMask, EyeOff, FileCode } from 'lucide-react';
 import { Share2, FileText, FileJson, Sparkles, BookOpen } from 'lucide-react';
 import { storageService } from './services/storageService';
 import { sendMessage, fetchModels, completeOnce, ToolApprovalRequest } from './services/llmService';
@@ -56,7 +56,7 @@ export default function App() {
                         }))
                         : []
                 };
-            } catch (e) {
+            } catch {
                 return DEFAULT_SETTINGS;
             }
         }
@@ -117,7 +117,9 @@ export default function App() {
                 setSettings(s => ({ ...s, activeProvider: firstConnected }));
             }
         }
-    }, [settings.groqConnected, settings.openRouterConnected, settings.openaiConnected, settings.cerebrasConnected, settings.geminiConnected, settings.xaiConnected, settings.custom1Connected, settings.custom2Connected, settings.chatgptConnected, settings.activeProvider]);
+        // Sólo cuando cambia qué proveedores están conectados (no en cada cambio de ajustes)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [settings.groqConnected, settings.openRouterConnected, settings.openaiConnected, settings.anthropicConnected, settings.cerebrasConnected, settings.geminiConnected, settings.xaiConnected, settings.custom1Connected, settings.custom2Connected, settings.chatgptConnected, settings.activeProvider]);
 
     // Token compartido con /api/mcp y /api/chatgpt
     useEffect(() => { setBridgeToken(settings.proxyToken); }, [settings.proxyToken]);

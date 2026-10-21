@@ -101,17 +101,17 @@ function startProcess(cfg: StdioConfig): Session {
     const isWin = process.platform === 'win32';
     const args = splitArgs(cfg.args || '');
     // En Windows, npx/uvx son .cmd y necesitan la shell; citamos lo que tenga espacios
-    const proc = spawn(
-        isWin ? `"${cfg.command.trim()}"` : cfg.command.trim(),
-        isWin ? args.map(a => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)) : args,
-        {
-            env: { ...process.env, ...parseEnv(cfg.env || '') },
-            cwd: cfg.cwd?.trim() || undefined,
-            shell: isWin,
-            stdio: ['pipe', 'pipe', 'pipe'],
-            windowsHide: true
-        }
-    );
+    const options = {
+        env: { ...process.env, ...parseEnv(cfg.env || '') },
+        cwd: cfg.cwd?.trim() || undefined,
+        stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+        windowsHide: true
+    };
+    // En Windows, npx/uvx son .cmd y necesitan la shell: se arma UNA línea con todo citado
+    const quote = (a: string) => (/[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
+    const proc = isWin
+        ? spawn([cfg.command.trim(), ...args].map(quote).join(' '), { ...options, shell: true })
+        : spawn(cfg.command.trim(), args, options);
 
     const session: Session = { proc, listeners: new Set(), backlog: [], stderr: '', exited: null, lastUsed: Date.now() };
 

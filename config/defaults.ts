@@ -1,20 +1,12 @@
 import { AppSettings, ChatSession, ThemeOption } from '../types';
 
-export const getEnv = (key: string, defaultVal: string = '') => {
-    // Try original key
-    // @ts-ignore
-    if (typeof process !== 'undefined' && process.env && process.env[key]) return process.env[key];
-    // @ts-ignore
-    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env[key]) return import.meta.env[key];
-
-    // Try VITE_ prefix if key starts with REACT_APP_
-    if (key.startsWith('REACT_APP_')) {
-        const viteKey = key.replace('REACT_APP_', 'VITE_');
-        // @ts-ignore
-        if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env[viteKey]) return import.meta.env[viteKey];
-    }
-
-    return defaultVal;
+/**
+ * Variable de entorno del build (Vite expone las que empiezan con VITE_ o REACT_APP_).
+ * Acepta el nombre con REACT_APP_ y también busca su equivalente VITE_.
+ */
+export const getEnv = (key: string, defaultVal: string = ''): string => {
+    const env: Record<string, string | undefined> = (import.meta as any).env || {};
+    return env[key] || (key.startsWith('REACT_APP_') ? env[key.replace('REACT_APP_', 'VITE_')] : undefined) || defaultVal;
 };
 
 // --- Themes Configuration ---

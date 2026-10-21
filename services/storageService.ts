@@ -21,7 +21,7 @@
  * - No hay transmisión de datos a servidores externos desde este servicio
  */
 
-import { get, set, del, keys, clear } from 'idb-keyval';
+import { get, set, del, keys } from 'idb-keyval';
 import { Attachment, ChatSession, Message } from '../types';
 
 // ============================================================================
