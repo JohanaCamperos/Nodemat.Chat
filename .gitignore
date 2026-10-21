@@ -7,3 +7,4 @@ dist/
 pedidoimagen.json
 nexus_*.json
 nodemat_*.json
+.claude/

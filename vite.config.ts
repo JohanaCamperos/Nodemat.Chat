@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleMcpProxy } from './server/mcpProxy';
 import { handleChatGPT } from './server/chatgpt';
@@ -72,7 +73,7 @@ export default defineConfig(({ mode }) => {
     // '' = cargar TODAS las variables de .env (las del servidor no llevan prefijo VITE_)
     const env = loadEnv(mode, process.cwd(), '');
     return {
-        plugins: [react(), apiRoutes(env)],
+        plugins: [react(), tailwindcss(), apiRoutes(env)],
         // Acepta VITE_ (lo que documenta el README) y REACT_APP_ (compatibilidad).
         // ⚠️ Todo lo que empiece con estos prefijos queda embebido en el bundle público.
         envPrefix: ['VITE_', 'REACT_APP_'],

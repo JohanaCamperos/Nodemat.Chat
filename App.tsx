@@ -21,6 +21,7 @@ import { FileUploadModal } from './components/FileUploadModal';
 import { ChatImage } from './components/ChatImage';
 import { ToolCallsBlock, ToolResultCard } from './components/ToolMessage';
 import { SearchableSelect } from './components/SearchableSelect';
+import { SecretInput } from './components/SecretInput';
 import { AppSettings, ChatSession, Message, Provider, Attachment, MCPTransport, MCPServer, ThemeOption, MCPAuthType, PROVIDER_NAMES } from './types';
 
 /** react-markdown elimina las URLs `data:` por seguridad; permitimos sólo imágenes. */
@@ -65,34 +66,34 @@ const DEFAULT_SETTINGS: AppSettings = {
     darkMode: false,
 
     groqKey: getEnv('REACT_APP_GROQ_API_KEY', ''),
-    groqModel: 'llama3-8b-8192',
+    groqModel: 'llama-3.3-70b-versatile',
     groqConnected: !!getEnv('REACT_APP_GROQ_API_KEY', ''),
-    groqModelsList: ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768', 'gemma-7b-it'],
+    groqModelsList: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b'],
 
     openRouterKey: getEnv('REACT_APP_OPENROUTER_API_KEY', ''),
-    openRouterModel: 'openai/gpt-3.5-turbo',
+    openRouterModel: 'openai/gpt-4o-mini',
     openRouterConnected: !!getEnv('REACT_APP_OPENROUTER_API_KEY', ''),
-    openRouterModelsList: ['openai/gpt-3.5-turbo', 'openai/gpt-4o', 'google/gemini-pro'],
+    openRouterModelsList: ['openai/gpt-4o-mini', 'openai/gpt-4o', 'google/gemini-2.5-flash'],
 
     openaiKey: getEnv('REACT_APP_OPENAI_API_KEY', ''),
     openaiModel: 'gpt-4o-mini',
     openaiConnected: !!getEnv('REACT_APP_OPENAI_API_KEY', ''),
-    openaiModelsList: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+    openaiModelsList: ['gpt-4.1-mini', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
 
     cerebrasKey: getEnv('REACT_APP_CEREBRAS_API_KEY', ''),
     cerebrasModel: 'llama3.1-8b',
     cerebrasConnected: !!getEnv('REACT_APP_CEREBRAS_API_KEY', ''),
-    cerebrasModelsList: ['llama3.1-8b', 'llama3.1-70b'],
+    cerebrasModelsList: ['llama3.1-8b', 'llama-3.3-70b'],
 
     geminiKey: getEnv('REACT_APP_GEMINI_API_KEY', ''),
-    geminiModel: 'gemini-1.5-flash',
+    geminiModel: 'gemini-2.5-flash',
     geminiConnected: !!getEnv('REACT_APP_GEMINI_API_KEY', ''),
-    geminiModelsList: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp'],
+    geminiModelsList: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
 
     xaiKey: getEnv('REACT_APP_XAI_API_KEY', ''),
-    xaiModel: 'grok-beta',
+    xaiModel: 'grok-3-mini',
     xaiConnected: !!getEnv('REACT_APP_XAI_API_KEY', ''),
-    xaiModelsList: ['grok-beta', 'grok-2-1212'],
+    xaiModelsList: ['grok-3-mini', 'grok-3', 'grok-4'],
 
     // Custom 1 - Configurable via env vars or UI
     custom1Name: getEnv('REACT_APP_CUSTOM1_NAME', 'Personalizado 1'),
@@ -148,7 +149,15 @@ const INITIAL_SESSION: ChatSession = {
 // --- UI COMPONENTS ---
 
 
-// Components are imported from ./components/
+/**
+ * Pantalla de acceso OPCIONAL: sólo aparece si se definió VITE_ADMIN_PASSWORD.
+ * Ojo: se valida en el navegador y el valor queda en el bundle, así que sólo
+ * evita que alguien use la app por accidente; no protege nada de verdad.
+ */
+const LOGIN_USER = getEnv('REACT_APP_ADMIN_USER', '');
+const LOGIN_PASSWORD = getEnv('REACT_APP_ADMIN_PASSWORD', '');
+const LOGIN_REQUIRED = !!LOGIN_PASSWORD;
+
 const LoginScreen = ({ onLogin }: { onLogin: () => void }) => {
     const [user, setUser] = useState('');
     const [pass, setPass] = useState('');
@@ -156,55 +165,41 @@ const LoginScreen = ({ onLogin }: { onLogin: () => void }) => {
 
     const handleLogin = (e: React.FormEvent) => {
         e.preventDefault();
-        const validUser = getEnv('REACT_APP_ADMIN_USER', 'admin');
-        const validPass = getEnv('REACT_APP_ADMIN_PASSWORD', 'admin');
-
-        if (user === validUser && pass === validPass) {
+        if ((!LOGIN_USER || user === LOGIN_USER) && pass === LOGIN_PASSWORD) {
             onLogin();
         } else {
             setError('Credenciales incorrectas');
         }
     };
 
+    const inputClass = "w-full p-3 bg-background border border-border text-text-main rounded-lg outline-none focus:ring-2 focus:ring-primary transition-all";
+
     return (
-        <div className="h-screen w-full flex items-center justify-center bg-gray-50">
-            <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm border border-gray-100">
+        <div className="h-screen w-full flex items-center justify-center bg-background">
+            <div className="bg-surface p-8 rounded-2xl shadow-xl w-full max-w-sm border border-border">
                 <div className="flex flex-col items-center mb-6">
-                    <div className="w-12 h-12 bg-black rounded-xl flex items-center justify-center text-white mb-3 shadow-lg">
+                    <div className="w-12 h-12 bg-primary rounded-xl flex items-center justify-center text-white mb-3 shadow-lg">
                         <Terminal size={24} />
                     </div>
-                    <h1 className="text-2xl font-bold text-gray-800">
-                        <span className="text-orange-600">Nodemat</span> Chat
-                    </h1>
-                    <p className="text-sm text-gray-500">Acceso Privado</p>
+                    <h1 className="text-2xl font-bold text-text-main">Nodemat Chat</h1>
+                    <p className="text-sm text-text-muted">Acceso privado</p>
                 </div>
 
                 <form onSubmit={handleLogin} className="space-y-4">
+                    {LOGIN_USER && (
+                        <div>
+                            <label htmlFor="login-user" className="block text-xs font-semibold text-text-muted mb-1">USUARIO</label>
+                            <input id="login-user" type="text" autoComplete="username" value={user} onChange={e => setUser(e.target.value)} className={inputClass} />
+                        </div>
+                    )}
                     <div>
-                        <label className="block text-xs font-semibold text-gray-600 mb-1">USUARIO</label>
-                        <input
-                            type="text"
-                            value={user}
-                            onChange={e => setUser(e.target.value)}
-                            className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-orange-500 transition-all"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-xs font-semibold text-gray-600 mb-1">CONTRASEÑA</label>
-                        <input
-                            type="password"
-                            value={pass}
-                            onChange={e => setPass(e.target.value)}
-                            className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-orange-500 transition-all"
-                        />
+                        <label htmlFor="login-pass" className="block text-xs font-semibold text-text-muted mb-1">CONTRASEÑA</label>
+                        <SecretInput id="login-pass" autoComplete="current-password" value={pass} onChange={e => setPass(e.target.value)} className={inputClass} />
                     </div>
 
-                    {error && <p className="text-red-500 text-sm text-center bg-red-50 p-2 rounded">{error}</p>}
+                    {error && <p className="text-red-500 text-sm text-center bg-red-500/10 p-2 rounded">{error}</p>}
 
-                    <button
-                        type="submit"
-                        className="w-full bg-black hover:bg-gray-800 text-white font-bold py-3 rounded-xl transition-all shadow-md active:scale-95"
-                    >
+                    <button type="submit" className="w-full bg-primary hover:bg-primary-hover text-white font-bold py-3 rounded-xl transition-all shadow-md active:scale-95">
                         Ingresar
                     </button>
                 </form>
@@ -213,7 +208,7 @@ const LoginScreen = ({ onLogin }: { onLogin: () => void }) => {
                     href="https://github.com/diegoparras/Nodemat-Chat"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="mt-6 flex items-center justify-center gap-2 text-gray-500 hover:text-gray-800 transition-colors text-sm"
+                    className="mt-6 flex items-center justify-center gap-2 text-text-muted hover:text-text-main transition-colors text-sm"
                 >
                     <Search size={18} />
                     Explorá el proyecto completo en GitHub
@@ -518,13 +513,15 @@ const Sidebar: React.FC<any> = ({
                     Borrar Todo (Reset)
                 </button>
 
-                <button
-                    onClick={onLogout}
-                    className="w-full flex items-center gap-3 p-3 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl text-sm font-medium transition-colors"
-                >
-                    <LogOut size={18} />
-                    Cerrar Sesión
-                </button>
+                {LOGIN_REQUIRED && (
+                    <button
+                        onClick={onLogout}
+                        className="w-full flex items-center gap-3 p-3 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-xl text-sm font-medium transition-colors"
+                    >
+                        <LogOut size={18} />
+                        Cerrar Sesión
+                    </button>
+                )}
             </div>
         </div>
     </>
@@ -588,8 +585,7 @@ const SettingsModal: React.FC<any> = ({
                                         )}
                                     </div>
                                 </div>
-                                <input
-                                    type="password"
+                                <SecretInput
                                     placeholder="gsk_..."
                                     value={settings.groqKey}
                                     disabled={settings.groqConnected}
@@ -635,8 +631,7 @@ const SettingsModal: React.FC<any> = ({
                                         )}
                                     </div>
                                 </div>
-                                <input
-                                    type="password"
+                                <SecretInput
                                     placeholder="sk-or-..."
                                     value={settings.openRouterKey}
                                     disabled={settings.openRouterConnected}
@@ -676,7 +671,7 @@ const SettingsModal: React.FC<any> = ({
                                         )}
                                     </div>
                                 </div>
-                                <input type="password" placeholder="sk-..." value={settings.openaiKey} disabled={settings.openaiConnected}
+                                <SecretInput placeholder="sk-..." value={settings.openaiKey} disabled={settings.openaiConnected}
                                     onChange={(e: any) => setSettings((s: AppSettings) => ({ ...s, openaiKey: e.target.value }))}
                                     className="w-full p-3 border border-border bg-background rounded-lg text-sm mb-3 focus:ring-2 focus:ring-primary outline-none disabled:opacity-60 text-text-main" />
                                 {settings.openaiConnected && (
@@ -710,7 +705,7 @@ const SettingsModal: React.FC<any> = ({
                                         )}
                                     </div>
                                 </div>
-                                <input type="password" placeholder="csk-..." value={settings.cerebrasKey} disabled={settings.cerebrasConnected}
+                                <SecretInput placeholder="csk-..." value={settings.cerebrasKey} disabled={settings.cerebrasConnected}
                                     onChange={(e: any) => setSettings((s: AppSettings) => ({ ...s, cerebrasKey: e.target.value }))}
                                     className="w-full p-3 border border-border bg-background rounded-lg text-sm mb-3 focus:ring-2 focus:ring-primary outline-none disabled:opacity-60 text-text-main" />
                                 {settings.cerebrasConnected && (
@@ -742,7 +737,7 @@ const SettingsModal: React.FC<any> = ({
                                         )}
                                     </div>
                                 </div>
-                                <input type="password" placeholder="AIza..." value={settings.geminiKey} disabled={settings.geminiConnected}
+                                <SecretInput placeholder="AIza..." value={settings.geminiKey} disabled={settings.geminiConnected}
                                     onChange={(e: any) => setSettings((s: AppSettings) => ({ ...s, geminiKey: e.target.value }))}
                                     className="w-full p-3 border border-border bg-background rounded-lg text-sm mb-3 focus:ring-2 focus:ring-primary outline-none disabled:opacity-60 text-text-main" />
                                 {settings.geminiConnected && (
@@ -774,7 +769,7 @@ const SettingsModal: React.FC<any> = ({
                                         )}
                                     </div>
                                 </div>
-                                <input type="password" placeholder="xai-..." value={settings.xaiKey} disabled={settings.xaiConnected}
+                                <SecretInput placeholder="xai-..." value={settings.xaiKey} disabled={settings.xaiConnected}
                                     onChange={(e: any) => setSettings((s: AppSettings) => ({ ...s, xaiKey: e.target.value }))}
                                     className="w-full p-3 border border-border bg-background rounded-lg text-sm mb-3 focus:ring-2 focus:ring-primary outline-none disabled:opacity-60 text-text-main" />
                                 {settings.xaiConnected && (
@@ -822,7 +817,7 @@ const SettingsModal: React.FC<any> = ({
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-text-muted mb-1 uppercase">API Key</label>
-                                        <input type="password" placeholder="sk-..." value={settings.custom1Key}
+                                        <SecretInput placeholder="sk-..." value={settings.custom1Key}
                                             disabled={settings.custom1Connected}
                                             onChange={(e: any) => setSettings((s: AppSettings) => ({ ...s, custom1Key: e.target.value }))}
                                             className="w-full p-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary outline-none disabled:opacity-60 text-text-main" />
@@ -876,7 +871,7 @@ const SettingsModal: React.FC<any> = ({
                                     </div>
                                     <div>
                                         <label className="block text-xs font-medium text-text-muted mb-1 uppercase">API Key</label>
-                                        <input type="password" placeholder="sk-..." value={settings.custom2Key}
+                                        <SecretInput placeholder="sk-..." value={settings.custom2Key}
                                             disabled={settings.custom2Connected}
                                             onChange={(e: any) => setSettings((s: AppSettings) => ({ ...s, custom2Key: e.target.value }))}
                                             className="w-full p-2 border border-border bg-background rounded-lg text-sm focus:ring-2 focus:ring-primary outline-none disabled:opacity-60 text-text-main" />
@@ -1031,8 +1026,7 @@ const SettingsModal: React.FC<any> = ({
                                                     <label className="block text-xs font-medium text-text-muted mb-1 uppercase flex items-center gap-1">
                                                         <Key size={12} /> Token / Key
                                                     </label>
-                                                    <input
-                                                        type="password"
+                                                    <SecretInput
                                                         value={server.authToken}
                                                         disabled={server.status === 'connected'}
                                                         onChange={(e: any) => {
@@ -1169,8 +1163,7 @@ const SettingsModal: React.FC<any> = ({
                             ))}
                             <div className="flex flex-col md:flex-row md:items-center gap-2 text-xs text-text-muted bg-surface p-3 rounded-xl border border-border">
                                 <label className="font-medium uppercase flex items-center gap-1 shrink-0"><Key size={12} /> Token del proxy</label>
-                                <input
-                                    type="password"
+                                <SecretInput
                                     value={settings.proxyToken || ''}
                                     onChange={(e: any) => { const val = e.target.value; setSettings((s: AppSettings) => ({ ...s, proxyToken: val })); }}
                                     placeholder="Opcional: sólo si el administrador definió NODEMAT_PROXY_TOKEN en el servidor"
@@ -1384,7 +1377,7 @@ const DeleteChatModal = ({
 export default function App() {
     // --- Auth State ---
     const [isAuthenticated, setIsAuthenticated] = useState(() => {
-        return localStorage.getItem('nexus_auth') === 'true';
+        return !LOGIN_REQUIRED || localStorage.getItem('nexus_auth') === 'true';
     });
 
     // --- App State ---

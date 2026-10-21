@@ -6,9 +6,12 @@ type Props = Omit<React.InputHTMLAttributes<HTMLInputElement>, 'type'>;
 /** Campo para claves y tokens con botón para mostrar / ocultar el valor. */
 export const SecretInput: React.FC<Props> = ({ className = '', ...props }) => {
     const [visible, setVisible] = useState(false);
+    // Los márgenes van al contenedor: si quedan en el input, el botón no queda centrado
+    const margins = className.split(/\s+/).filter(c => /^-?m[trblxy]?-/.test(c));
+    const inputClass = className.split(/\s+/).filter(c => !margins.includes(c)).join(' ');
     return (
-        <div className="relative flex-1 min-w-0">
-            <input {...props} type={visible ? 'text' : 'password'} className={`${className} w-full pr-9`} />
+        <div className={`relative flex-1 min-w-0 ${margins.join(' ')}`}>
+            <input {...props} type={visible ? 'text' : 'password'} className={`${inputClass} w-full pr-9`} />
             <button
                 type="button"
                 onClick={() => setVisible(v => !v)}
